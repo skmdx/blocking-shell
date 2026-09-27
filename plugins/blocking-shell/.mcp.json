@@ -1,0 +1,27 @@
+{
+  "mcpServers": {
+    "blocking-shell": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--script",
+        "server.py"
+      ],
+      "env_vars": [
+        "XDG_RUNTIME_DIR",
+        "DBUS_SESSION_BUS_ADDRESS",
+        "TERM",
+        "DISPLAY",
+        "WAYLAND_DISPLAY",
+        "XAUTHORITY",
+        "SSH_AUTH_SOCK"
+      ],
+      "omit_tools_from": [
+        "code_mode"
+      ],
+      "startup_timeout_sec": 60,
+      "tool_timeout_sec": 86520,
+      "cwd": "."
+    }
+  }
+}

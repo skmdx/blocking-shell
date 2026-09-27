@@ -1,0 +1,20 @@
+{
+  "name": "blocking-shell",
+  "interface": {
+    "displayName": "Blocking Shell"
+  },
+  "plugins": [
+    {
+      "name": "blocking-shell",
+      "source": {
+        "source": "local",
+        "path": "./plugins/blocking-shell"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

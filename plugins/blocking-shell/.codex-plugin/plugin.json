@@ -1,0 +1,19 @@
+{
+  "name": "blocking-shell",
+  "version": "0.1.0",
+  "description": "Run long shell commands through one blocking MCP call without polling.",
+  "author": {
+    "name": "skmdx"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Blocking Shell",
+    "shortDescription": "Wait for builds and tests without polling",
+    "longDescription": "Run long shell commands through one blocking MCP call without polling.",
+    "developerName": "skmdx",
+    "category": "Productivity",
+    "capabilities": [],
+    "defaultPrompt": "Run the build and wait for completion with blocking-shell."
+  },
+  "mcpServers": "./.mcp.json"
+}
