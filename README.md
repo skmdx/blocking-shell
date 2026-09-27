@@ -25,6 +25,8 @@ codex plugin add blocking-shell@blocking-shell
 共通引数は`exec_command`と同じ`cmd`、`workdir`、`max_output_tokens`、
 `shell`、`login`、`tty`。MCPにはターンのcwdが渡されないため、`workdir`は必須。
 `log_dir`も既存の絶対パスで指定する。独自引数`timeout_seconds`は既定21600秒。
+通常のビルドでは省略する。指定すると既定値を上書きし、期限でコマンド自体を停止する。
+結果の`timeout_seconds`で実際に適用した期限を確認できる。
 `yield_time_ms`とsandbox・承認引数は提供しない。
 `shell`省略時はユーザーの既定シェル、`login=true`、`tty=false`。
 `tty=true`で新しいPTYを割り当てる。標準入力への対話操作は提供しない。
@@ -52,6 +54,7 @@ python3 plugins/blocking-shell/tests/smoke_codex.py --codex /path/to/codex --out
 
 65秒待機を含むMakefileでCプログラムをコンパイル・実行し、Codexの実記録で
 直接呼び出し1回、途中のポーリング0回、正常終了、実行結果を検証する。
+呼び出しで期限を上書きせず、既定21600秒が適用されることも確認する。
 試験の出力ディレクトリは確認後に削除する。
 
 MIT License。詳細は [LICENSE](LICENSE) を参照。

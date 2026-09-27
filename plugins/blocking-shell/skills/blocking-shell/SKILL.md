@@ -12,6 +12,10 @@ Pass the authorized shell text as `cmd`, the command's existing absolute
 `workdir`, and an existing absolute scratch directory as `log_dir`.
 Use the workspace's temporary directory when specified.
 `timeout_seconds` defaults to six hours and permits up to 24 hours.
+For builds, omit `timeout_seconds` unless an explicit deadline is required.
+Do not shorten it from an estimated build duration: this deadline terminates the
+command, rather than returning early while the build continues. Results report
+the effective `timeout_seconds` alongside elapsed time.
 No environment capture or preparation file is needed.
 
 Shared arguments follow exec_command: `cmd`, `workdir`, `max_output_tokens`,

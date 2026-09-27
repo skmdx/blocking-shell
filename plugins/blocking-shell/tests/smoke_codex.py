@@ -26,7 +26,8 @@ def main():
 First use functions.exec to print typeof tools.mcp__blocking_shell__run and whether
 ALL_TOOLS contains that name. Do not run shell commands from functions.exec.
 Then call the direct blocking-shell run MCP tool exactly once with cmd="make",
-log_dir={str(root)!r}, workdir={str(root)!r}, tty=true, login=false, timeout_seconds=120.
+log_dir={str(root)!r}, workdir={str(root)!r}, tty=true, login=false.
+Use the plugin's default timeout without overriding it.
 Do not use exec_command, polling, or another command runner. After it returns,
 report the tool result briefly. Do not edit files or invoke other tools.'''
     with (root / "events.jsonl").open("w") as out, (root / "stderr.log").open("w") as err:
@@ -46,6 +47,7 @@ report the tool result briefly. Do not edit files or invoke other tools.'''
             and r["payload"].get("name") == "run"]
     assert len(runs) == 1, calls
     index, call = runs[0]
+    assert "timeout_seconds" not in json.loads(call["payload"]["arguments"]), call
     finish_index, finish = next((i, r) for i, r in enumerate(records) if i > index
                                and r.get("payload", {}).get("call_id") == call["payload"]["call_id"]
                                and r["payload"].get("type") == "function_call_output")
@@ -59,6 +61,7 @@ report the tool result briefly. Do not edit files or invoke other tools.'''
     assert "Script running with cell ID" not in outputs
     report, = [json.loads(p.read_text()) for p in root.glob("blocking-shell-*/result.json")]
     assert report["status"] == "completed" and report["exit_code"] == 0, report
+    assert report["timeout_seconds"] == 21600, report
     assert "BUILD_OK" in report["output_tail"], report
     assert report["cpu_seconds"] > 0 and report["memory_peak_bytes"] > 0, report
     assert report["io_read_bytes"] is not None and report["io_write_bytes"] is not None, report
@@ -67,6 +70,7 @@ report the tool result briefly. Do not edit files or invoke other tools.'''
         assert not Path("/sys/fs/cgroup", report["control_group"].lstrip("/")).exists(), report
     assert subprocess.check_output([str(root / "hello")], text=True).strip() == "BUILD_OK"
     summary = dict(passed=True, direct_calls=1, polling_calls=0,
+                   timeout_seconds=report["timeout_seconds"],
                    duration_seconds=duration, session_log=str(log),
                    cpu_seconds=report["cpu_seconds"], memory_peak_bytes=report["memory_peak_bytes"],
                    io_read_bytes=report["io_read_bytes"], io_write_bytes=report["io_write_bytes"])

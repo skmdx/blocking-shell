@@ -81,7 +81,10 @@ async def run(cmd: str, workdir: str, log_dir: str,
     elapsed seconds, CPU seconds, peak memory bytes and block IO read/write bytes.
     Unavailable accounting counters are null. Statistics cover the unit cgroup
     before cleanup (before stopping the command on cancellation).
-    timeout_seconds is 1..86400, default six hours. max_output_tokens is nonnegative.
+    timeout_seconds is 1..86400, default six hours. Omit it for builds unless an
+    explicit deadline is required; do not shorten it from an estimated duration.
+    The deadline stops the command, not just the wait. The result reports the
+    effective timeout_seconds. max_output_tokens is nonnegative.
     No yield_time_ms or sandbox/approval arguments: this MCP blocks until completion
     and runs with the MCP server's permissions. On timeout or cancellation,
     stops the unit cgroup. Foreground jobs only; no detached daemons.
@@ -177,6 +180,7 @@ async def run(cmd: str, workdir: str, log_dir: str,
                 size = log.stat().st_size
                 tail, token_count, truncated = output_tail(log, max_output_tokens)
                 result.update(status=status, exit_code=exit_code,
+                              timeout_seconds=timeout_seconds,
                               cpu_seconds=cpu_ns / 1e9 if cpu_ns is not None else None,
                               memory_peak_bytes=counter(properties, "MemoryPeak"),
                               io_read_bytes=counter(properties, "IOReadBytes"),

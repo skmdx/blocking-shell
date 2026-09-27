@@ -48,10 +48,13 @@ async def main():
                     assert result["output_tokens"] <= kwargs.get("max_output_tokens", 10000)
                     assert result["accounting_error"] is None, result
                     assert result["cleanup_error"] is None, result
+                    assert result["timeout_seconds"] == kwargs.get("timeout_seconds", 21600), result
                     if result["control_group"]:
                         assert not Path("/sys/fs/cgroup", result["control_group"].lstrip("/")).exists(), result
                     return result
 
+                r = await run('unit=$(basename "$(sed -n "s/^0:://p" /proc/self/cgroup)"); systemctl --user show "$unit" --property=TimeoutStartUSec --value')
+                assert r["output_tail"].strip() == "6h", r
                 r = await run("pwd; printf hello; printf error >&2; test -t 0 && test -t 1 && test -t 2 && echo tty-connected", tty=True)
                 assert r["status"] == "completed" and r["exit_code"] == 0, r
                 assert tmp in r["output_tail"] and "helloerrortty-connected" in r["output_tail"], r
