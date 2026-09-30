@@ -41,7 +41,14 @@ in the foreground.
 
 Read `status` and `exit_code`; a timeout is not a successful build. Full combined
 output and `result.json` remain at the returned paths. Inspect only the necessary
-log excerpts and remove scratch results when no longer needed. After a transport
+log excerpts. Call `cleanup` directly, with no arguments, to delete all result
+directories created by `run` in the current MCP server session across all
+`log_dir` locations when they are no longer needed. It skips running commands;
+call again after they finish. Other sessions and unrelated files are untouched.
+It returns `deleted`, `missing`, `skipped_active`, and `errors` by path; failed
+deletions remain tracked for retry. Tracking is in memory and ends when the MCP
+server exits; results from a previous server process require manual removal.
+After a transport
 failure, inspect the process and saved result before deciding to rerun a command.
 
 Results include `cpu_seconds`, `memory_peak_bytes`, `io_read_bytes` and

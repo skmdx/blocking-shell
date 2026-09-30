@@ -11,6 +11,7 @@ from pathlib import Path
 import sys
 import tempfile
 import shlex
+import shutil
 
 import tiktoken
 
@@ -29,7 +30,10 @@ async def main():
         async with stdio_client(StdioServerParameters(command=sys.executable, args=[str(server)], env=env, cwd=tmp)) as (reader, writer):
             async with ClientSession(reader, writer, read_timeout_seconds=timedelta(seconds=20)) as session:
                 await session.initialize()
-                schema = (await session.list_tools()).tools[0].inputSchema
+                schemas = {tool.name: tool.inputSchema for tool in (await session.list_tools()).tools}
+                assert set(schemas) == {"run", "cleanup"}, schemas
+                assert not schemas["cleanup"]["properties"], schemas
+                schema = schemas["run"]
                 assert set(schema["required"]) == {"cmd", "workdir", "log_dir"}, schema
                 assert schema["properties"]["timeout_seconds"]["default"] == 21600
                 assert schema["properties"]["tty"]["default"] is False
@@ -130,7 +134,58 @@ async def main():
                 assert any(r["status"] == "cancelled" for r in reports), reports
                 response = await session.call_tool("run", dict(cmd="touch invalid", workdir=tmp, log_dir=tmp, timeout_seconds=0))
                 assert response.isError and not (root / "invalid").exists()
-    print("PASS: real MCP execution, failure, pipefail, bounded output, timeout, cancellation, validation")
+
+                async def cleanup(client=session):
+                    response = await client.call_tool("cleanup", {})
+                    assert not response.isError, response
+                    assert isinstance(response.content[0], TextContent)
+                    return json.loads(response.content[0].text)
+
+                # A second actual server must not see this session's directories.
+                async with stdio_client(StdioServerParameters(command=sys.executable, args=[str(server)], env=env)) as (other_reader, other_writer):
+                    async with ClientSession(other_reader, other_writer) as other:
+                        await other.initialize()
+                        response = await other.call_tool("run", dict(cmd="true", workdir=tmp, log_dir=tmp))
+                        assert not response.isError, response
+                        assert isinstance(response.content[0], TextContent)
+                        other_dir = Path(json.loads(response.content[0].text)["result_path"]).parent
+                        unrelated = root / "blocking-shell-unrelated"
+                        unrelated.mkdir()
+                        (unrelated / "keep").write_text("keep")
+                        elsewhere = root / "other-logs"
+                        elsewhere.mkdir()
+                        response = await session.call_tool("run", dict(cmd="true", workdir=tmp, log_dir=str(elsewhere)))
+                        assert not response.isError, response
+                        expected = set(root.glob("blocking-shell-*/result.json")) | set(elsewhere.glob("*/result.json"))
+                        expected_dirs = {str(p.parent) for p in expected} - {str(other_dir)}
+                        missing = Path(r["result_path"]).parent
+                        shutil.rmtree(missing)
+                        task = asyncio.create_task(run("echo active > cleanup-ready; sleep 2; echo finished"))
+                        while not (root / "cleanup-ready").exists():
+                            await asyncio.sleep(0.01)
+                        cleaned = await cleanup()
+                        assert set(cleaned["deleted"]) == expected_dirs - {str(missing)}, cleaned
+                        assert cleaned["missing"] == [str(missing)], cleaned
+                        assert not cleaned["errors"], cleaned
+                        assert len(cleaned["skipped_active"]) == 1, cleaned
+                        assert all(not Path(p).exists() for p in cleaned["deleted"])
+                        assert other_dir.is_dir() and (unrelated / "keep").read_text() == "keep"
+                        finished = await task
+                        assert finished["output_tail"] == "finished\n", finished
+                        cleaned = await cleanup()
+                        assert cleaned["deleted"] == [str(Path(finished["result_path"]).parent)], cleaned
+                        assert await cleanup() == dict(deleted=[], missing=[], skipped_active=[], errors={})
+                        assert (await cleanup(other))["deleted"] == [str(other_dir)]
+                        failed = Path((await run("true"))["result_path"]).parent
+                        shutil.rmtree(failed)
+                        failed.symlink_to(unrelated, target_is_directory=True)
+                        cleaned = await cleanup()
+                        assert set(cleaned["errors"]) == {str(failed)}, cleaned
+                        assert (unrelated / "keep").read_text() == "keep"
+                        failed.unlink()
+                        failed.mkdir()
+                        assert (await cleanup())["deleted"] == [str(failed)]
+    print("PASS: real MCP execution, failure, pipefail, bounded output, timeout, cancellation, validation, session cleanup and retry")
 
 
 if __name__ == "__main__":
