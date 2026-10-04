@@ -108,7 +108,7 @@ def counter(properties: dict[str, str], name: str) -> int | None:
 async def run(cmd: str, workdir: str, log_dir: str,
               max_output_tokens: int = 10000, shell: str | None = None,
               login: bool = True, tty: bool = False,
-              timeout_seconds: int = 21600) -> dict:
+              timeout_seconds: int = 21600, memory_max_mib: int = 8192) -> dict:
     """Run an authorized shell command and block until it exits; no polling handle.
 
     Call directly, outside code-mode. Shared exec_command arguments: cmd, workdir,
@@ -129,6 +129,9 @@ async def run(cmd: str, workdir: str, log_dir: str,
     explicit deadline is required; do not shorten it from an estimated duration.
     The deadline stops the command, not just the wait. The result reports the
     effective timeout_seconds. max_output_tokens is nonnegative.
+    memory_max_mib is the positive cgroup memory limit for the command and all
+    descendants (default 8192 MiB). Swap is disabled. Exceeding the memory limit
+    kills the whole command group; no retry with relaxed limits is performed.
     No yield_time_ms or sandbox/approval arguments: this MCP blocks until completion
     and runs with the MCP server's permissions. On timeout or cancellation,
     stops the unit cgroup. Foreground jobs only; no detached daemons.
@@ -143,6 +146,8 @@ async def run(cmd: str, workdir: str, log_dir: str,
         raise ValueError("timeout_seconds must be 1..86400")
     if max_output_tokens < 0:
         raise ValueError("max_output_tokens must be nonnegative")
+    if memory_max_mib < 1:
+        raise ValueError("memory_max_mib must be positive")
     executable = shell or pwd.getpwuid(os.getuid()).pw_shell
     environment = dict(os.environ)
     with result_directory(logs) as out:
@@ -185,6 +190,9 @@ async def run(cmd: str, workdir: str, log_dir: str,
                 "--unit=" + unit, "--expand-environment=no",
                 "--working-directory=" + str(work).replace("%", "%%"),
                 "--property=MemoryAccounting=yes", "--property=IOAccounting=yes",
+                "--property=MemoryMax=" + str(memory_max_mib * 1024**2),
+                "--property=MemorySwapMax=0",
+                "--property=OOMPolicy=kill",
                 "--property=TimeoutStartSec=" + str(timeout_seconds),
                 "--property=TimeoutStopSec=2", "--property=KillMode=control-group",
                 *("--property=" + value for value in io_properties),
@@ -203,7 +211,8 @@ async def run(cmd: str, workdir: str, log_dir: str,
                 with anyio.CancelScope(shield=True):
                     code, accounting = await control(environment, "show", unit, "--property=" + ",".join((
                         "Result", "ExecMainCode", "ExecMainStatus", "CPUUsageNSec",
-                        "MemoryPeak", "IOReadBytes", "IOWriteBytes", "ControlGroup")))
+                        "MemoryPeak", "MemoryMax", "MemorySwapMax",
+                        "IOReadBytes", "IOWriteBytes", "ControlGroup")))
                     properties = dict(line.split("=", 1) for line in accounting.splitlines()
                                       if "=" in line) if code == 0 else {}
                     stop_code, stop_output = await control(environment, "stop", unit)
@@ -227,6 +236,8 @@ async def run(cmd: str, workdir: str, log_dir: str,
                                   timeout_seconds=timeout_seconds,
                                   cpu_seconds=cpu_ns / 1e9 if cpu_ns is not None else None,
                                   memory_peak_bytes=counter(properties, "MemoryPeak"),
+                                  memory_max_bytes=counter(properties, "MemoryMax"),
+                                  memory_swap_max_bytes=counter(properties, "MemorySwapMax"),
                                   io_read_bytes=counter(properties, "IOReadBytes"),
                                   io_write_bytes=counter(properties, "IOWriteBytes"),
                                   unit=unit, unit_result=properties.get("Result"),

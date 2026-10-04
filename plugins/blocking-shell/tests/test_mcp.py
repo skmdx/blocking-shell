@@ -36,6 +36,7 @@ async def main():
                 schema = schemas["run"]
                 assert set(schema["required"]) == {"cmd", "workdir", "log_dir"}, schema
                 assert schema["properties"]["timeout_seconds"]["default"] == 21600
+                assert schema["properties"]["memory_max_mib"]["default"] == 8192
                 assert schema["properties"]["tty"]["default"] is False
                 assert schema["properties"]["login"]["default"] is True
                 assert not {"env_file", "env", "cwd", "command", "tail_bytes"} & schema["properties"].keys(), schema
@@ -53,9 +54,22 @@ async def main():
                     assert result["accounting_error"] is None, result
                     assert result["cleanup_error"] is None, result
                     assert result["timeout_seconds"] == kwargs.get("timeout_seconds", 21600), result
+                    assert result["memory_max_bytes"] == kwargs.get("memory_max_mib", 8192) * 1024**2, result
+                    assert result["memory_swap_max_bytes"] == 0, result
                     if result["control_group"]:
                         assert not Path("/sys/fs/cgroup", result["control_group"].lstrip("/")).exists(), result
                     return result
+
+                # Read the actual kernel limits, then exceed a small limit in
+                # a child. The entire service must stop before its parent can
+                # report success. This allocates at most 64 MiB, without swap.
+                r = await run("python3 - <<'PY'\nfrom pathlib import Path\np = Path('/sys/fs/cgroup') / Path('/proc/self/cgroup').read_text().strip().split('0::')[1].lstrip('/')\nprint((p/'memory.max').read_text().strip(), (p/'memory.swap.max').read_text().strip(), (p/'memory.oom.group').read_text().strip())\nPY")
+                assert r["output_tail"].strip() == "8589934592 0 1", r
+                r = await run("python3 -c 'x=bytearray(256*1024*1024)' ; echo escaped-memory-limit", memory_max_mib=64)
+                assert r["status"] == "failed" and r["unit_result"] == "oom-kill", r
+                assert "escaped-memory-limit" not in r["output_tail"], r
+                response = await session.call_tool("run", dict(cmd="touch invalid-memory", workdir=tmp, log_dir=tmp, memory_max_mib=0))
+                assert response.isError and not (root / "invalid-memory").exists()
 
                 r = await run('unit=$(basename "$(sed -n "s/^0:://p" /proc/self/cgroup)"); systemctl --user show "$unit" --property=TimeoutStartUSec --value')
                 assert r["output_tail"].strip() == "6h", r

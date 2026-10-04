@@ -27,6 +27,9 @@ codex plugin add blocking-shell@blocking-shell
 `log_dir`も既存の絶対パスで指定する。独自引数`timeout_seconds`は既定21600秒。
 通常のビルドでは省略する。指定すると既定値を上書きし、期限でコマンド自体を停止する。
 結果の`timeout_seconds`で実際に適用した期限を確認できる。
+全子孫プロセスを含むメモリ上限は既定8 GiB。`memory_max_mib`で正のMiB値を指定できる。
+swapは禁止し、メモリ超過時はcgroup全体を停止する。上限を外した自動再試行はしない。
+結果の`memory_max_bytes`と`memory_swap_max_bytes`に適用値を返す。
 `yield_time_ms`とsandbox・承認引数は提供しない。
 `shell`省略時はユーザーの既定シェル、`login=true`、`tty=false`。
 `tty=true`で新しいPTYを割り当てる。標準入力への対話操作は提供しない。
