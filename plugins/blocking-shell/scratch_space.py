@@ -6,17 +6,10 @@ import fcntl
 import json
 import os
 from pathlib import Path
-import secrets
 import shutil
 import stat
 import uuid
-
-
-WORDS = ('ash bay bee birch bird blue boat brook calm cave clay cloud coast coral '
-         'dawn deer dew dove dusk elm fern field finch fir fish flint fog fox frog '
-         'frost glen gold grass green grove gull hill lake leaf lime maple mist moon '
-         'moss oak owl palm peak pine plum pond rain reed ridge river rock rose sage '
-         'sand sea sky snow star stone sun swan teal tide tree vale wave west wind wood').split()
+from word_ids import WORDS, new_id
 
 
 class ScratchSpace:
@@ -62,9 +55,7 @@ class ScratchSpace:
     def create(self) -> dict:
         with self._registry() as records:
             for _ in range(100):
-                path = self.root / '-'.join(secrets.choice(WORDS) for _ in range(3))
-                if path.name in records:
-                    continue
+                path = self.root / new_id(records.__contains__)
                 try:
                     path.mkdir(mode=0o700)
                     break
