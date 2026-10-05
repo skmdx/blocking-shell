@@ -113,6 +113,23 @@ class ScratchSpace:
                 raise ValueError('scratch path changed during lookup')
             yield resolved
 
+    def list(self) -> dict:
+        """List existing session directories without changing the registry."""
+        result: dict = dict(directories=[], missing=[], errors={})
+        with self._registry() as records:
+            for ref, record in sorted(records.items()):
+                if record['session'] != self.session or record.get('deleted'):
+                    continue
+                try:
+                    path = self._path(record)
+                except FileNotFoundError:
+                    result['missing'].append(ref)
+                except (OSError, ValueError) as error:
+                    result['errors'][ref] = str(error)
+                else:
+                    result['directories'].append(dict(scratch_ref=ref, path=str(path)))
+        return result
+
     def delete(self, refs: list[str] | None = None) -> dict:
         result: dict = dict(deleted=[], missing=[], skipped_active=[], errors={})
         with self._registry() as records:
