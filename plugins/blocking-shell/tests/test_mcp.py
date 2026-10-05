@@ -20,6 +20,7 @@ from mcp.shared.exceptions import McpError
 from mcp.types import CancelledNotification, CancelledNotificationParams, ClientNotification, TextContent
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scratch_space import ScratchSpace
+from word_ids import valid_id
 
 
 async def main():
@@ -51,6 +52,7 @@ async def main():
                     assert isinstance(content, TextContent)
                     result = json.loads(content.text)
                     assert json.loads(Path(result["result_path"]).read_text()) == result
+                    assert valid_id(Path(result["result_path"]).parent.name.removeprefix('blocking-shell-')), result
                     assert result["output_token_encoding"] == "o200k_base"
                     assert result["output_tokens"] == len(encoding.encode_ordinary(result["output_tail"]))
                     assert result["output_tokens"] <= kwargs.get("max_output_tokens", 10000)

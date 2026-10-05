@@ -10,7 +10,6 @@ import json
 import os
 from pathlib import Path
 import pwd
-import tempfile
 import termios
 import time
 
@@ -19,6 +18,7 @@ import tiktoken
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 from scratch_space import ScratchSpace
+from word_ids import create_directory
 
 mcp = FastMCP("blocking-shell")
 encoding = tiktoken.get_encoding("o200k_base")
@@ -28,7 +28,7 @@ max_token_bytes = max(map(len, encoding.token_byte_values()))
 @contextmanager
 def result_directory(scratch_ref: str):
     with ScratchSpace().lease(scratch_ref) as logs:
-        out = Path(tempfile.mkdtemp(prefix="blocking-shell-", dir=logs))
+        out = create_directory(logs, prefix="blocking-shell-")
         yield out
 
 

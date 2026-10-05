@@ -1,6 +1,7 @@
 """Readable opaque references. Canonical source: tools/word-ids."""
 import secrets
 import sqlite3
+from pathlib import Path
 from collections.abc import Callable
 
 WORDS = ('ash bay bee birch bird blue boat brook calm cave clay cloud coast coral '
@@ -21,6 +22,18 @@ def new_id(is_used: Callable[[str], bool] = lambda _: False) -> str:
 def valid_id(value: str) -> bool:
     parts = value.split('-')
     return len(parts) == 3 and all(part in WORDS for part in parts)
+
+
+def create_directory(parent: Path, prefix: str = '') -> Path:
+    """Reserve a private directory atomically, retrying only name collisions."""
+    for _ in range(100):
+        directory = parent / (prefix + new_id())
+        try:
+            directory.mkdir(mode=0o700)
+        except FileExistsError:
+            continue
+        return directory
+    raise RuntimeError('could not allocate a unique word-ID directory')
 
 
 def store_reference(db: sqlite3.Connection, table: str, payload: str) -> str:
