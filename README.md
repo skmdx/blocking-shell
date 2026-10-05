@@ -24,7 +24,8 @@ codex plugin add blocking-shell@blocking-shell
 コマンドの期限超過時に終了処理と結果の返却を行う余裕を設けている。
 共通引数は`exec_command`と同じ`cmd`、`workdir`、`max_output_tokens`、
 `shell`、`login`、`tty`。MCPにはターンのcwdが渡されないため、`workdir`は必須。
-`log_dir`も既存の絶対パスで指定する。独自引数`timeout_seconds`は既定21600秒。
+Scratchプラグインの`create`が返す英単語IDを`scratch_ref`へ渡す。
+独自引数`timeout_seconds`は既定21600秒。
 通常のビルドでは省略する。指定すると既定値を上書きし、期限でコマンド自体を停止する。
 結果の`timeout_seconds`で実際に適用した期限を確認できる。
 全子孫プロセスを含むメモリ上限は既定8 GiB。`memory_max_mib`で正のMiB値を指定できる。
@@ -43,12 +44,9 @@ swapは禁止し、メモリ超過時はcgroup全体を停止する。上限を�
 CPU時間・最大メモリ・ブロックIO量の範囲と単位はスキルを参照。
 サーバーの強制終了やホスト障害からのジョブ復元は行わない。
 
-`cleanup` を引数なしで直接呼ぶと、現在のMCPサーバーセッションで `run` が
-作成した結果ディレクトリを、複数の `log_dir` をまたいで一括削除する。
-実行中の結果は除外し、別セッションや無関係なファイルは削除しない。
-返却値は `deleted`、`missing`、`skipped_active` のパス一覧と、パス別の `errors`。
-削除失敗分は再試行できる。記録はメモリ上に保持するため、サーバー再起動前の
-結果は対象外となり、手動で削除する。
+結果が不要になったらScratchの`delete(refs=[...])`で一時ディレクトリごと削除する。
+実行中は参照をロックし、削除は`skipped_active`となる。削除失敗分は再試行できる。
+共通クライアント`scratch_space.py`はworkspaceの`tools/scratch/sync.py`で同期する生成物。
 
 実MCP通信の試験:
 

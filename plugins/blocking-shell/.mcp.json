@@ -8,6 +8,9 @@
         "server.py"
       ],
       "env_vars": [
+        "CODEX_WORK",
+        "SCRATCH_ROOT",
+        "CODEX_THREAD_ID",
         "XDG_RUNTIME_DIR",
         "DBUS_SESSION_BUS_ADDRESS",
         "TERM",

@@ -10,7 +10,6 @@ import json
 import os
 from pathlib import Path
 import pwd
-import shutil
 import tempfile
 import termios
 import time
@@ -19,52 +18,18 @@ import anyio
 import tiktoken
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
+from scratch_space import ScratchSpace
 
 mcp = FastMCP("blocking-shell")
 encoding = tiktoken.get_encoding("o200k_base")
 max_token_bytes = max(map(len, encoding.token_byte_values()))
-result_dirs: set[Path] = set()
-active_dirs: set[Path] = set()
 
 
 @contextmanager
-def result_directory(logs: Path):
-    out = Path(tempfile.mkdtemp(prefix="blocking-shell-", dir=logs))
-    result_dirs.add(out)
-    active_dirs.add(out)
-    try:
+def result_directory(scratch_ref: str):
+    with ScratchSpace().lease(scratch_ref) as logs:
+        out = Path(tempfile.mkdtemp(prefix="blocking-shell-", dir=logs))
         yield out
-    finally:
-        active_dirs.remove(out)
-
-
-@mcp.tool(annotations=ToolAnnotations(destructiveHint=True, openWorldHint=False))
-async def cleanup() -> dict:
-    """Delete result directories created by run in this MCP server session.
-
-    Call directly, outside code-mode, when saved logs and results are no longer
-    needed. Takes no paths; covers all log_dir locations used in this session.
-    Running commands are skipped. Other sessions and unrelated files are untouched.
-    Returns deleted, missing, skipped_active paths and errors by path. Failed
-    deletions stay tracked for retry. Tracking ends when the MCP server exits.
-    """
-    result: dict = dict(deleted=[], missing=[], skipped_active=[], errors={})
-    for out in sorted(result_dirs):
-        path = str(out)
-        if out in active_dirs:
-            result["skipped_active"].append(path)
-            continue
-        try:
-            shutil.rmtree(out)
-        except FileNotFoundError:
-            result["missing"].append(path)
-        except OSError as error:
-            result["errors"][path] = str(error)
-            continue
-        else:
-            result["deleted"].append(path)
-        result_dirs.remove(out)
-    return result
 
 
 def output_tail(log: Path, budget: int) -> tuple[str, int, bool]:
@@ -105,15 +70,16 @@ def counter(properties: dict[str, str], name: str) -> int | None:
 
 
 @mcp.tool(annotations=ToolAnnotations(destructiveHint=True, openWorldHint=True))
-async def run(cmd: str, workdir: str, log_dir: str,
+async def run(cmd: str, workdir: str, scratch_ref: str,
               max_output_tokens: int = 10000, shell: str | None = None,
               login: bool = True, tty: bool = False,
               timeout_seconds: int = 21600, memory_max_mib: int = 8192) -> dict:
     """Run an authorized shell command and block until it exits; no polling handle.
 
     Call directly, outside code-mode. Shared exec_command arguments: cmd, workdir,
-    max_output_tokens, shell, login and tty. workdir and log_dir must be existing
-    absolute directories. workdir is required because MCP cannot see the turn cwd.
+    max_output_tokens, shell, login and tty. workdir must be an existing absolute
+    directory; scratch_ref is the ID returned by scratch.create for temporary logs.
+    workdir is required because MCP cannot see the turn cwd.
     Uses systemd-run --user and the user's default shell unless shell is supplied.
     login defaults to true; tty defaults to false (true allocates a new PTY).
     Interactive input is not exposed. Put environment assignments in cmd.
@@ -121,7 +87,8 @@ async def run(cmd: str, workdir: str, log_dir: str,
     metadata. output_tokens is its exact count; output_token_encoding names the
     encoding. Full logs are retained. Invalid UTF-8 is replaced before counting.
     Saves combined stdout/stderr and result.json in a new
-    directory under log_dir. Returns exit code, status, a bounded output tail,
+    directory under scratch_ref. Use scratch.delete after using results; active runs
+    are protected from deletion. Returns exit code, status, a bounded output tail,
     elapsed seconds, CPU seconds, peak memory bytes and block IO read/write bytes.
     Unavailable accounting counters are null. Statistics cover the unit cgroup
     before cleanup (before stopping the command on cancellation).
@@ -139,9 +106,6 @@ async def run(cmd: str, workdir: str, log_dir: str,
     work = Path(workdir)
     if not work.is_absolute() or not work.is_dir():
         raise ValueError("workdir must be an existing absolute directory")
-    logs = Path(log_dir)
-    if not logs.is_absolute() or not logs.is_dir():
-        raise ValueError("log_dir must be an existing absolute directory")
     if not 1 <= timeout_seconds <= 86400:
         raise ValueError("timeout_seconds must be 1..86400")
     if max_output_tokens < 0:
@@ -150,7 +114,7 @@ async def run(cmd: str, workdir: str, log_dir: str,
         raise ValueError("memory_max_mib must be positive")
     executable = shell or pwd.getpwuid(os.getuid()).pw_shell
     environment = dict(os.environ)
-    with result_directory(logs) as out:
+    with result_directory(scratch_ref) as out:
         log = out / "output.log"
         log.touch()
         unit = out.name + ".service"
