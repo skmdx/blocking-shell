@@ -8,8 +8,11 @@ Announce the command first; the call waits until completion without a poll handl
 Supply the existing absolute `workdir` and `scratch_ref` from Scratch's `create`.
 Keep jobs in the foreground and use noninteractive options.
 
-For builds, omit `timeout_seconds` unless an explicit deadline is required.
-The deadline stops the command; do not shorten it from an estimated duration.
+The execution deadline is six hours by default, including when omitted.
+Set `timeout_seconds` when a different deadline is needed; expiry stops the
+command and descendants. Do not shorten it from a guessed build duration.
+Normally omit `shell` and `login`. Select `shell` when command syntax requires it;
+set `login: false` when login startup files must not change the environment.
 Commands inherit the MCP server's startup environment. Put per-command environment
 assignments in `cmd`; later changes in another shell are not inherited.
 

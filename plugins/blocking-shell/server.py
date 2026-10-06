@@ -5,16 +5,16 @@
 """Run foreground shell commands in one blocking MCP request."""
 import asyncio
 from contextlib import contextmanager
-import errno
 import json
 import os
 from pathlib import Path
 import pwd
-import termios
 import time
+from typing import Annotated
 
 import anyio
 import tiktoken
+from pydantic import Field
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 from scratch_space import ScratchSpace
@@ -70,48 +70,36 @@ def counter(properties: dict[str, str], name: str) -> int | None:
 
 
 @mcp.tool(annotations=ToolAnnotations(destructiveHint=True, openWorldHint=True))
-async def run(cmd: str, workdir: str, scratch_ref: str,
-              max_output_tokens: int = 10000, shell: str | None = None,
-              login: bool = True, tty: bool = False,
-              timeout_seconds: int = 21600, memory_max_mib: int = 8192) -> dict:
-    """Run an authorized shell command and block until it exits; no polling handle.
+async def run(
+    cmd: Annotated[str, Field(
+        description="Foreground command, including any per-command environment assignments.")],
+    workdir: Annotated[str, Field(description="Existing absolute working directory.")],
+    scratch_ref: Annotated[str, Field(description="ID from scratch.create for saved logs and results.")],
+    max_output_tokens: Annotated[int, Field(ge=0, strict=True,
+        description="Maximum tokens in the returned log tail; full logs are saved.")] = 10000,
+    shell: Annotated[str | None, Field(
+        description="Shell executable; omit for the user's default shell. "
+                    "Specify when cmd requires a particular shell syntax.")] = None,
+    login: Annotated[bool, Field(
+        description="Use -lc (login startup files). Set false for -c when startup "
+                    "files must not alter the command environment.")] = True,
+    timeout_seconds: Annotated[int, Field(ge=1, le=86400, strict=True,
+        description="Execution deadline in seconds, default six hours. Set when a "
+                    "different deadline is needed; expiry stops the command and descendants.")] = 21600,
+    memory_max_mib: Annotated[int, Field(ge=1, strict=True,
+        description="Memory limit in MiB for the command and all descendants; swap is disabled.")] = 8192,
+) -> dict:
+    """Run a foreground command and wait for completion in one direct MCP call.
 
-    Call directly, outside code-mode. Shared exec_command arguments: cmd, workdir,
-    max_output_tokens, shell, login and tty. workdir must be an existing absolute
-    directory; scratch_ref is the ID returned by scratch.create for temporary logs.
-    workdir is required because MCP cannot see the turn cwd.
-    Uses systemd-run --user and the user's default shell unless shell is supplied.
-    login defaults to true; tty defaults to false (true allocates a new PTY).
-    Interactive input is not exposed. Put environment assignments in cmd.
-    max_output_tokens limits output_tail using tiktoken o200k_base, excluding JSON
-    metadata. output_tokens is its exact count; output_token_encoding names the
-    encoding. Full logs are retained. Invalid UTF-8 is replaced before counting.
-    Saves combined stdout/stderr and result.json in a new
-    directory under scratch_ref. Use scratch.delete after using results; active runs
-    are protected from deletion. Returns exit code, status, a bounded output tail,
-    elapsed seconds, CPU seconds, peak memory bytes and block IO read/write bytes.
-    Unavailable accounting counters are null. Statistics cover the unit cgroup
-    before cleanup (before stopping the command on cancellation).
-    timeout_seconds is 1..86400, default six hours. Omit it for builds unless an
-    explicit deadline is required; do not shorten it from an estimated duration.
-    The deadline stops the command, not just the wait. The result reports the
-    effective timeout_seconds. max_output_tokens is nonnegative.
-    memory_max_mib is the positive cgroup memory limit for the command and all
-    descendants (default 8192 MiB). Swap is disabled. Exceeding the memory limit
-    kills the whole command group; no retry with relaxed limits is performed.
-    No yield_time_ms or sandbox/approval arguments: this MCP blocks until completion
-    and runs with the MCP server's permissions. On timeout or cancellation,
-    stops the unit cgroup. Foreground jobs only; no detached daemons.
+    No interactive input. Returns status, exit code, bounded output_tail, saved log
+    paths and cgroup resource statistics. Inspect accounting_error and cleanup_error
+    before relying on statistics or cleanup; unavailable counters are null.
+    Timeout, cancellation and memory exhaustion stop the command group.
+    Use scratch.delete after the saved results are no longer needed.
     """
     work = Path(workdir)
     if not work.is_absolute() or not work.is_dir():
         raise ValueError("workdir must be an existing absolute directory")
-    if not 1 <= timeout_seconds <= 86400:
-        raise ValueError("timeout_seconds must be 1..86400")
-    if max_output_tokens < 0:
-        raise ValueError("max_output_tokens must be nonnegative")
-    if memory_max_mib < 1:
-        raise ValueError("memory_max_mib must be positive")
     executable = shell or pwd.getpwuid(os.getuid()).pw_shell
     environment = dict(os.environ)
     with result_directory(scratch_ref) as out:
@@ -122,33 +110,7 @@ async def run(cmd: str, workdir: str, scratch_ref: str,
         started = time.monotonic()
         status = "completed"
         result: dict = {}
-        master, slave = os.openpty() if tty else (-1, -1)
-        if tty:
-            termios.tcsetwinsize(slave, (24, 80))
-        loop = asyncio.get_running_loop()
-        terminal_done = loop.create_future()
-        with manager_log.open("wb") as stream, log.open("wb", buffering=0) as output:
-            def receive_output():
-                try:
-                    data = os.read(master, 65536)
-                    if data:
-                        output.write(data)
-                        return
-                except OSError as error:
-                    if error.errno != errno.EIO:
-                        loop.remove_reader(master)
-                        terminal_done.set_exception(error)
-                        return
-                loop.remove_reader(master)
-                terminal_done.set_result(None)
-
-            if tty:
-                loop.add_reader(master, receive_output)
-            io_properties = (
-                ["StandardInput=tty", "StandardOutput=tty", "StandardError=tty",
-                 "TTYPath=" + os.ttyname(slave)] if tty else
-                ["StandardInput=null", "StandardOutput=append:" + str(log).replace("%", "%%"),
-                 "StandardError=inherit"])
+        with manager_log.open("wb") as stream:
             proc = await asyncio.create_subprocess_exec(
                 "systemd-run", "--user", "--service-type=oneshot", "--remain-after-exit",
                 "--unit=" + unit, "--expand-environment=no",
@@ -159,7 +121,9 @@ async def run(cmd: str, workdir: str, scratch_ref: str,
                 "--property=OOMPolicy=kill",
                 "--property=TimeoutStartSec=" + str(timeout_seconds),
                 "--property=TimeoutStopSec=2", "--property=KillMode=control-group",
-                *("--property=" + value for value in io_properties),
+                "--property=StandardInput=null",
+                "--property=StandardOutput=append:" + str(log).replace("%", "%%"),
+                "--property=StandardError=inherit",
                 *("--setenv=" + key for key in environment),
                 executable, "-lc" if login else "-c", cmd,
                 cwd=work, stdin=asyncio.subprocess.DEVNULL,
@@ -182,10 +146,6 @@ async def run(cmd: str, workdir: str, scratch_ref: str,
                     stop_code, stop_output = await control(environment, "stop", unit)
                     await proc.wait()
                     await control(environment, "reset-failed", unit)
-                    if tty:
-                        os.close(slave)
-                        await terminal_done
-                        os.close(master)
                     if status != "cancelled" and properties.get("Result") == "timeout":
                         status = "timeout"
                     exit_code = counter(properties, "ExecMainStatus")

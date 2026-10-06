@@ -41,7 +41,11 @@ async def main():
                 assert set(schema["required"]) == {"cmd", "workdir", "scratch_ref"}, schema
                 assert schema["properties"]["timeout_seconds"]["default"] == 21600
                 assert schema["properties"]["memory_max_mib"]["default"] == 8192
-                assert schema["properties"]["tty"]["default"] is False
+                assert "tty" not in schema["properties"]
+                assert schema["properties"]["timeout_seconds"]["minimum"] == 1
+                assert schema["properties"]["timeout_seconds"]["maximum"] == 86400
+                assert schema["properties"]["memory_max_mib"]["minimum"] == 1
+                assert schema["properties"]["max_output_tokens"]["minimum"] == 0
                 assert schema["properties"]["login"]["default"] is True
                 assert not {"env_file", "env", "cwd", "command", "tail_bytes"} & schema["properties"].keys(), schema
 
@@ -73,14 +77,23 @@ async def main():
                 r = await run("python3 -c 'x=bytearray(256*1024*1024)' ; echo escaped-memory-limit", memory_max_mib=64)
                 assert r["status"] == "failed" and r["unit_result"] == "oom-kill", r
                 assert "escaped-memory-limit" not in r["output_tail"], r
-                response = await session.call_tool("run", dict(cmd="touch invalid-memory", workdir=tmp, scratch_ref=ref, memory_max_mib=0))
-                assert response.isError and not (root / "invalid-memory").exists()
+                before = set(logs.iterdir())
+                for invalid in [
+                    {"memory_max_mib": 0}, {"memory_max_mib": -1},
+                    {"timeout_seconds": 0}, {"timeout_seconds": 86401},
+                    {"max_output_tokens": -1}, {"timeout_seconds": 1.5},
+                    {"memory_max_mib": True},
+                ]:
+                    response = await session.call_tool("run", dict(cmd="touch invalid", workdir=tmp, scratch_ref=ref, **invalid))
+                    assert response.isError, (invalid, response)
+                    assert not (root / "invalid").exists()
+                    assert set(logs.iterdir()) == before
 
                 r = await run('unit=$(basename "$(sed -n "s/^0:://p" /proc/self/cgroup)"); systemctl --user show "$unit" --property=TimeoutStartUSec --value')
                 assert r["output_tail"].strip() == "6h", r
-                r = await run("pwd; printf hello; printf error >&2; test -t 0 && test -t 1 && test -t 2 && echo tty-connected", tty=True)
+                r = await run("pwd; printf hello; printf error >&2")
                 assert r["status"] == "completed" and r["exit_code"] == 0, r
-                assert tmp in r["output_tail"] and "helloerrortty-connected" in r["output_tail"], r
+                assert tmp in r["output_tail"] and "helloerror" in r["output_tail"], r
                 r = await run('printf "%s\\n" "$BLOCKING_SHELL_TEST"; cat /proc/self/cgroup')
                 assert "inherited $value % value" in r["output_tail"], r
                 assert r["unit"] in r["output_tail"], r
@@ -105,6 +118,8 @@ async def main():
                 assert not response.isError, response
                 assert isinstance(response.content[0], TextContent)
                 assert json.loads(response.content[0].text)["exit_code"] == 0, response
+                r = await run("shopt -q login_shell", shell="/bin/bash")
+                assert r["exit_code"] == 1, r
                 r = await run("exit 7")
                 assert r["status"] == "failed" and r["exit_code"] == 7, r
                 r = await run("kill -TERM $$")
@@ -151,8 +166,6 @@ async def main():
                 assert not (root / "detached-escaped").exists()
                 reports = [json.loads(p.read_text()) for p in logs.glob("*/result.json")]
                 assert any(r["status"] == "cancelled" for r in reports), reports
-                response = await session.call_tool("run", dict(cmd="touch invalid", workdir=tmp, scratch_ref=ref, timeout_seconds=0))
-                assert response.isError and not (root / "invalid").exists()
 
                 task = asyncio.create_task(run("echo active > scratch-ready; sleep 1; echo finished"))
                 while not (root / 'scratch-ready').exists():

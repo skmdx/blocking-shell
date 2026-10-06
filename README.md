@@ -22,18 +22,19 @@ codex plugin add blocking-shell@blocking-shell
 `run` の引数・出力・実行権限は [スキル](plugins/blocking-shell/skills/blocking-shell/SKILL.md) と
 ツールの説明を参照。ホスト側のツール期限は24時間より120秒長く設定し、
 コマンドの期限超過時に終了処理と結果の返却を行う余裕を設けている。
-共通引数は`exec_command`と同じ`cmd`、`workdir`、`max_output_tokens`、
-`shell`、`login`、`tty`。MCPにはターンのcwdが渡されないため、`workdir`は必須。
+`cmd`にコマンド、`workdir`に既存ディレクトリの絶対パスを指定する。
+MCPにはターンのcwdが渡されないため、`workdir`は必須。
 Scratchプラグインの`create`が返す英単語IDを`scratch_ref`へ渡す。
-独自引数`timeout_seconds`は既定21600秒。
-通常のビルドでは省略する。指定すると既定値を上書きし、期限でコマンド自体を停止する。
+`timeout_seconds`は省略時も21600秒（6時間）で停止する。
+別の実行期限が必要な場合だけ1〜86400秒で指定する。期限では子孫プロセスも停止する。
 結果の`timeout_seconds`で実際に適用した期限を確認できる。
 全子孫プロセスを含むメモリ上限は既定8 GiB。`memory_max_mib`で正のMiB値を指定できる。
 swapは禁止し、メモリ超過時はcgroup全体を停止する。上限を外した自動再試行はしない。
 結果の`memory_max_bytes`と`memory_swap_max_bytes`に適用値を返す。
-`yield_time_ms`とsandbox・承認引数は提供しない。
-`shell`省略時はユーザーの既定シェル、`login=true`、`tty=false`。
-`tty=true`で新しいPTYを割り当てる。標準入力への対話操作は提供しない。
+`shell`省略時はユーザーの既定シェルを使う。特定のシェル構文が必要な場合だけ指定する。
+`login=true`（既定）は`-lc`でログイン時の起動ファイルを読み込む。
+起動ファイルによる環境変更を避ける場合は`login=false`とし、`-c`で実行する。
+標準入力は閉じ、stdout/stderrを結合ログへ保存する。PTY・対話入力は提供しない。
 `max_output_tokens`は既定10000。tiktokenの`o200k_base`で返却本文を実測し、
 上限以内の末尾出力を返す。`output_tokens`に実トークン数、
 `output_token_encoding`にエンコーディング名を返す。結果JSONのメタデータは対象外。
@@ -41,7 +42,8 @@ swapは禁止し、メモリ超過時はcgroup全体を停止する。上限を�
 完全なstdout/stderrは結合ログとして保存する。
 環境ファイルの準備は不要。変数は`CC=clang make`のように`cmd`内で指定する。
 転送する変数は`.mcp.json`の`env_vars`で指定し、別シェルでの変更は自動継承しない。
-CPU時間・最大メモリ・ブロックIO量の範囲と単位はスキルを参照。
+CPU時間は秒、最大メモリとブロックIO量はバイトで、子孫を含むunit cgroupの回収前の値。
+取得不能は`null`となる。`accounting_error`と`cleanup_error`で統計取得・回収の失敗を確認する。
 サーバーの強制終了やホスト障害からのジョブ復元は行わない。
 
 結果が不要になったらScratchの`delete(refs=[...])`で一時ディレクトリごと削除する。
