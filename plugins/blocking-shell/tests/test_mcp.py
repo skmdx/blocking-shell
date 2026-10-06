@@ -21,6 +21,7 @@ from mcp.types import CancelledNotification, CancelledNotificationParams, Client
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scratch_space import ScratchSpace
 from word_ids import valid_id
+from server import summarize
 
 
 async def main():
@@ -46,6 +47,7 @@ async def main():
                 assert schema["properties"]["timeout_seconds"]["maximum"] == 86400
                 assert schema["properties"]["memory_max_mib"]["minimum"] == 1
                 assert schema["properties"]["max_output_tokens"]["minimum"] == 0
+                assert schema["properties"]["max_output_tokens"]["default"] == 1000
                 assert schema["properties"]["login"]["default"] is True
                 assert not {"env_file", "env", "cwd", "command", "tail_bytes"} & schema["properties"].keys(), schema
 
@@ -54,12 +56,21 @@ async def main():
                     assert not response.isError, response
                     content = response.content[0]
                     assert isinstance(content, TextContent)
-                    result = json.loads(content.text)
-                    assert json.loads(Path(result["result_path"]).read_text()) == result
+                    summary = json.loads(content.text)
+                    assert response.structuredContent is None
+                    result = json.loads(Path(summary["result_path"]).read_text())
+                    assert all(result[k] == v for k, v in summary.items())
+                    assert "timeout_seconds" not in summary and "output_token_encoding" not in summary
+                    assert "accounting_error" not in summary and "cleanup_error" not in summary
+                    if result["status"] == "completed" and result["exit_code"] == 0:
+                        assert "unit" not in summary and "systemd_log_path" not in summary
+                    else:
+                        assert summary["unit_result"] == result["unit_result"]
+                        assert summary["systemd_log_path"] == result["systemd_log_path"]
                     assert valid_id(Path(result["result_path"]).parent.name.removeprefix('blocking-shell-')), result
                     assert result["output_token_encoding"] == "o200k_base"
                     assert result["output_tokens"] == len(encoding.encode_ordinary(result["output_tail"]))
-                    assert result["output_tokens"] <= kwargs.get("max_output_tokens", 10000)
+                    assert result["output_tokens"] <= kwargs.get("max_output_tokens", 1000)
                     assert result["accounting_error"] is None, result
                     assert result["cleanup_error"] is None, result
                     assert result["timeout_seconds"] == kwargs.get("timeout_seconds", 21600), result
@@ -94,6 +105,11 @@ async def main():
                 r = await run("pwd; printf hello; printf error >&2")
                 assert r["status"] == "completed" and r["exit_code"] == 0, r
                 assert tmp in r["output_tail"] and "helloerror" in r["output_tail"], r
+                for error in ("accounting_error", "cleanup_error"):
+                    diagnostic = summarize(dict(r, **{error: "unavailable", "io_read_bytes": None}))
+                    assert diagnostic[error] == "unavailable"
+                    assert diagnostic["io_read_bytes"] is None
+                    assert diagnostic["systemd_log_path"] == r["systemd_log_path"]
                 r = await run('printf "%s\\n" "$BLOCKING_SHELL_TEST"; cat /proc/self/cgroup')
                 assert "inherited $value % value" in r["output_tail"], r
                 assert r["unit"] in r["output_tail"], r
@@ -130,6 +146,9 @@ async def main():
                 assert r["exit_code"] == 1, r
                 r = await run("head -c 1000000 /dev/zero", max_output_tokens=8)
                 assert r["output_bytes"] == 1000000 and r["output_tokens"] == 8 and r["output_truncated"], r
+                r = await run("python3 -c 'print(\"word \" * 3000)'")
+                assert r["output_truncated"] and r["output_tokens"] <= 1000, r
+                assert Path(r["log_path"]).read_text() == "word " * 3000 + "\n"
                 for value in ["hello world", "日本語の出力です。😀🧑🏽‍💻", "<|endoftext|>", " " * 1024]:
                     total = len(encoding.encode_ordinary(value))
                     for budget in [0, 1, 2, total, total + 1]:

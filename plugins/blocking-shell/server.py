@@ -69,14 +69,28 @@ def counter(properties: dict[str, str], name: str) -> int | None:
     return int(value)
 
 
-@mcp.tool(annotations=ToolAnnotations(destructiveHint=True, openWorldHint=True))
+def summarize(result: dict) -> dict:
+    summary = {key: result[key] for key in (
+        "status", "exit_code", "elapsed_seconds", "cpu_seconds", "memory_peak_bytes",
+        "io_read_bytes", "io_write_bytes", "output_tail", "output_truncated",
+        "log_path", "result_path")}
+    for key in ("accounting_error", "cleanup_error"):
+        if result[key] is not None:
+            summary[key] = result[key]
+    if result["status"] != "completed" or result["exit_code"] != 0 or any(
+            result[key] is not None for key in ("accounting_error", "cleanup_error")):
+        summary.update({key: result[key] for key in ("unit", "unit_result", "systemd_log_path")})
+    return summary
+
+
+@mcp.tool(structured_output=False, annotations=ToolAnnotations(destructiveHint=True, openWorldHint=True))
 async def run(
     cmd: Annotated[str, Field(
         description="Foreground command, including any per-command environment assignments.")],
     workdir: Annotated[str, Field(description="Existing absolute working directory.")],
     scratch_ref: Annotated[str, Field(description="ID from scratch.create for saved logs and results.")],
     max_output_tokens: Annotated[int, Field(ge=0, strict=True,
-        description="Maximum tokens in the returned log tail; full logs are saved.")] = 10000,
+        description="Maximum tokens in the returned log tail (default 1000), excluding metadata; full logs are saved.")] = 1000,
     shell: Annotated[str | None, Field(
         description="Shell executable; omit for the user's default shell. "
                     "Specify when cmd requires a particular shell syntax.")] = None,
@@ -92,8 +106,9 @@ async def run(
     """Run a foreground command and wait for completion in one direct MCP call.
 
     No interactive input. Returns status, exit code, bounded output_tail, saved log
-    paths and cgroup resource statistics. Inspect accounting_error and cleanup_error
-    before relying on statistics or cleanup; unavailable counters are null.
+    paths and cgroup resource statistics. accounting_error and cleanup_error appear
+    only on failure; unavailable counters remain null. Full metadata and applied
+    limits are saved at result_path; abnormal results also include systemd diagnostics.
     Timeout, cancellation and memory exhaustion stop the command group.
     Use scratch.delete after the saved results are no longer needed.
     """
@@ -175,7 +190,7 @@ async def run(
                                   output_truncated=truncated,
                                   log_path=str(log), result_path=str(out / "result.json"))
                     (out / "result.json").write_text(json.dumps(result, indent=2) + "\n")
-    return result
+    return summarize(result)
 
 
 if __name__ == "__main__":
