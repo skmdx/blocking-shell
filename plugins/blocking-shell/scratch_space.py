@@ -113,13 +113,17 @@ class ScratchSpace:
                 raise ValueError('scratch path changed during lookup')
             yield resolved
 
-    def list(self) -> dict:
+    def list(self, after: str | None = None, limit: int = 40) -> dict:
         """List existing session directories without changing the registry."""
+        if not 1 <= limit <= 100:
+            raise ValueError('limit must be 1..100')
         result: dict = dict(directories=[], missing=[], errors={})
         with self._registry() as records:
-            for ref, record in sorted(records.items()):
-                if record['session'] != self.session or record.get('deleted'):
-                    continue
+            selected = sorted(ref for ref, record in records.items()
+                              if record['session'] == self.session and not record.get('deleted')
+                              and (after is None or ref > after))
+            for ref in selected[:limit]:
+                record = records[ref]
                 try:
                     path = self._path(record)
                 except FileNotFoundError:
@@ -128,7 +132,9 @@ class ScratchSpace:
                     result['errors'][ref] = str(error)
                 else:
                     result['directories'].append(dict(scratch_ref=ref, path=str(path)))
-        return result
+            if len(selected) > limit:
+                result['next_after'] = selected[limit - 1]
+        return {key: value for key, value in result.items() if value or key == 'directories'}
 
     def delete(self, refs: list[str] | None = None) -> dict:
         result: dict = dict(deleted=[], missing=[], skipped_active=[], errors={})
@@ -169,4 +175,4 @@ class ScratchSpace:
                 records[ref] = dict(session=self.session, deleted=True)
                 (self.state / f'{ref}.lock').unlink(missing_ok=True)
             self._save(records)
-        return result
+        return {key: value for key, value in result.items() if value or key == 'deleted'}
