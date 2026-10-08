@@ -8,6 +8,19 @@ Announce the command first; the call waits until completion without a poll handl
 Supply the existing absolute `workdir` and `scratch_ref` from Scratch's `create`.
 Keep jobs in the foreground and use noninteractive options.
 
+If a command already started with `exec_command` runs longer than expected,
+replace repeated `write_stdin` polling with one direct `run` call using
+`cmd: "tail --pid=12345 -f /dev/null"` (GNU tail). Replace `12345` with the
+actual OS PID of the running command or its wrapper that waits for all work,
+not the `exec_command` session ID or a persistent interactive shell. Obtain the
+PID from existing output or one targeted process lookup. Supply `workdir` and
+`scratch_ref` as usual; do not restart the original command.
+After the wait returns, call `write_stdin` once on the original session to collect
+its final output and exit code. A successful tail exit only confirms that the
+PID disappeared, not that the command succeeded. The wait does not move the
+original job into blocking-shell's cgroup: its limits, timeout, cancellation and
+statistics apply only to the waiting process.
+
 The execution deadline is six hours by default, including when omitted.
 Set `timeout_seconds` when a different deadline is needed; expiry stops the
 command and descendants. Do not shorten it from a guessed build duration.
