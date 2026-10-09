@@ -14,6 +14,7 @@ if __name__ == '__main__':
         values = state.list()
         print('Environment overrides set through blocking-shell for this conversation:')
         print(json.dumps(values, ensure_ascii=False, separators=(',', ':')))
-        bashrc = state.bashrc()
-        if bashrc is not None:
-            print('Additional blocking-shell bashrc for this conversation: ' + json.dumps(bashrc))
+        refs = [item['ref'] for item in state.scripts()]
+        if refs:
+            print('Blocking-shell bashrc refs in execution order (get_bashrc reads source): ' +
+                  json.dumps(refs))

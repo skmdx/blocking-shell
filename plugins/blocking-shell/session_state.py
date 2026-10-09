@@ -1,10 +1,11 @@
 """Persistent conversation state for commands and environment hooks."""
-from contextlib import closing
+from contextlib import closing, contextmanager
 import json
 import os
 from pathlib import Path
 import re
 import sqlite3
+from word_ids import new_id
 
 
 class SessionState:
@@ -38,20 +39,46 @@ class SessionState:
     def list(self) -> dict[str, str]:
         return self.update({}, [])
 
-    def bashrc(self, *, path: str | None = None, update: bool = False) -> str | None:
+    @contextmanager
+    def script_db(self):
         with closing(sqlite3.connect(self.path, timeout=10)) as db, db:
-            db.execute('CREATE TABLE IF NOT EXISTS bashrc '
-                       '(session TEXT PRIMARY KEY, path TEXT NOT NULL)')
-            if update:
-                if path is None:
-                    db.execute('DELETE FROM bashrc WHERE session=?', (self.session,))
-                else:
-                    db.execute('INSERT INTO bashrc VALUES (?, ?) '
-                               'ON CONFLICT(session) DO UPDATE SET path=excluded.path',
-                               (self.session, path))
-            row = db.execute('SELECT path FROM bashrc WHERE session=?',
-                             (self.session,)).fetchone()
-            return row[0] if row else None
+            db.execute('CREATE TABLE IF NOT EXISTS bash_scripts '
+                       '(position INTEGER PRIMARY KEY AUTOINCREMENT, '
+                       'session TEXT NOT NULL, ref TEXT UNIQUE NOT NULL, script TEXT NOT NULL)')
+            yield db
+
+    def scripts(self, ref: str | None = None) -> list[dict[str, str]]:
+        with self.script_db() as db:
+            query = 'SELECT ref, script FROM bash_scripts WHERE session=?'
+            parameters = [self.session]
+            if ref is not None:
+                query += ' AND ref=?'
+                parameters.append(ref)
+            rows = db.execute(query + ' ORDER BY position', parameters).fetchall()
+            if ref is not None and not rows:
+                raise ValueError('Unknown bashrc reference in this conversation')
+            return [dict(ref=key, script=script) for key, script in rows]
+
+    def set_script(self, script: str, ref: str | None = None) -> str:
+        if '\0' in script:
+            raise ValueError('Bash scripts must not contain NUL')
+        with self.script_db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            if ref is None:
+                ref = new_id(lambda key: db.execute(
+                    'SELECT 1 FROM bash_scripts WHERE ref=?', (key,)).fetchone() is not None)
+                db.execute('INSERT INTO bash_scripts (session, ref, script) VALUES (?, ?, ?)',
+                           (self.session, ref, script))
+            elif not db.execute('UPDATE bash_scripts SET script=? WHERE session=? AND ref=?',
+                                (script, self.session, ref)).rowcount:
+                raise ValueError('Unknown bashrc reference in this conversation')
+            return ref
+
+    def delete_script(self, ref: str) -> None:
+        with self.script_db() as db:
+            if not db.execute('DELETE FROM bash_scripts WHERE session=? AND ref=?',
+                              (self.session, ref)).rowcount:
+                raise ValueError('Unknown bashrc reference in this conversation')
 
     def command(self, arguments: dict | None = None) -> dict:
         with closing(sqlite3.connect(self.path, timeout=10)) as db, db:

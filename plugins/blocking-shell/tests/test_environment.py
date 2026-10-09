@@ -39,8 +39,6 @@ async def main():
         override_env.write_text("env_probe() { printf 'override\\n'; }\n")
         configured_env = root/'configured env'
         configured_env.write_text("env_probe() { printf 'configured\\n'; }\n")
-        session_rc = root/"session ' bashrc"
-        session_rc.write_text("env_probe\nshopt -s expand_aliases\nalias session_probe='printf session'\n")
         codex_home = root/'codex'
         codex_home.mkdir()
         codex_config = codex_home/'config.toml'
@@ -71,8 +69,10 @@ async def main():
         values = {'ENV_TEST': 'literal $HOME %u "quotes" \\ slash\n日本語',
                   'ENV_EMPTY': '', 'XDG_RUNTIME_DIR': '/job-only-runtime'}
         async with connect() as session:
-            assert set(t.name for t in (await session.list_tools()).tools) == {'run', 'rerun', 'set_env', 'unset_env', 'list_env', 'set_bashrc', 'get_bashrc'}
-            assert await call(session, 'get_bashrc') == {'path': None}
+            assert set(t.name for t in (await session.list_tools()).tools) == {
+                'run', 'rerun', 'set_env', 'unset_env', 'list_env',
+                'set_bashrc', 'get_bashrc', 'list_bashrc', 'delete_bashrc'}
+            assert await call(session, 'list_bashrc') == {'refs': []}
             for login in (False, True):
                 request = dict(cmd='env_probe', workdir=directory, scratch_ref=ref,
                                shell='/bin/bash', login=login, memory_max_mib=64)
@@ -91,28 +91,39 @@ async def main():
                 codex_config.unlink()
                 restored = await call(session, 'rerun')
                 assert restored['exit_code'] == 0 and restored['output_tail'] == 'inherited\n', restored
-            await call(session, 'set_bashrc', {'path': str(session_rc)})
-            for invalid in ('relative', str(root), str(root/'missing')):
-                await call(session, 'set_bashrc', {'path': invalid}, error=True)
-            assert await call(session, 'get_bashrc') == {'path': str(session_rc)}
-            assert await call(session, 'get_bashrc', owner='two') == {'path': None}
+            script = "env_probe\nshopt -s expand_aliases\nalias session_probe='printf session'\n"
+            first = (await call(session, 'set_bashrc', {'script': script}))['ref']
+            second_script = "session_probe\nprintf 'second\\n'\n"
+            second = (await call(session, 'set_bashrc', {'script': second_script}))['ref']
+            assert first != second
+            assert await call(session, 'list_bashrc') == {'refs': [first, second]}
+            assert await call(session, 'get_bashrc', {'ref': first}) == {'ref': first, 'script': script}
+            await call(session, 'set_bashrc', {'script': '\0', 'ref': first}, error=True)
+            await call(session, 'set_bashrc', {'script': ':', 'ref': 'missing'}, error=True)
+            assert await call(session, 'list_bashrc', owner='two') == {'refs': []}
+            for tool, arguments in (('get_bashrc', {'ref': first}),
+                                    ('set_bashrc', {'ref': first, 'script': ':'}),
+                                    ('delete_bashrc', {'ref': first})):
+                await call(session, tool, arguments, owner='two', error=True)
             request = dict(cmd='session_probe', workdir=directory, scratch_ref=ref,
                            shell='/bin/bash', memory_max_mib=64)
             for login in (False, True):
                 result = await call(session, 'run', dict(request, login=login))
-                assert result['exit_code'] == 0 and result['output_tail'] == 'inherited\nsession', result
+                assert result['exit_code'] == 0 and result['output_tail'] == 'inherited\nsessionsecond\nsession', result
             foreign = await call(session, 'run', dict(request, cmd='env_probe', login=False), owner='two')
             assert foreign['output_tail'] == 'inherited\n', foreign
             await call(session, 'run', dict(request, shell='/bin/sh'), error=True)
-            session_rc.write_text("session_probe() { printf changed; }\n")
+            await call(session, 'set_bashrc', {'ref': first, 'script': "session_probe() { printf changed; }\n"})
+            assert await call(session, 'list_bashrc') == {'refs': [first, second]}
             changed = await call(session, 'rerun')
-            assert changed['exit_code'] == 0 and changed['output_tail'] == 'changed', changed
-            session_rc.write_text('return 7\n')
+            assert changed['exit_code'] == 0 and changed['output_tail'] == 'changedsecond\nchanged', changed
+            await call(session, 'set_bashrc', {'ref': first, 'script': 'return 7\n'})
             failed = await call(session, 'rerun')
-            assert failed['exit_code'] == 7 and 'changed' not in failed['output_tail'], failed
-            session_rc.unlink()
-            await call(session, 'rerun', error=True)
-            session_rc.write_text(':\n')
+            assert failed['exit_code'] == 7 and 'second' not in failed['output_tail'], failed
+            assert await call(session, 'delete_bashrc', {'ref': second}) == {'deleted': second}
+            await call(session, 'get_bashrc', {'ref': second}, error=True)
+            await call(session, 'delete_bashrc', {'ref': second}, error=True)
+            await call(session, 'set_bashrc', {'ref': first, 'script': ':\n'})
             assert (await call(session, 'set_env', {'values': values}))['variables'] == values
             assert json.loads(await run(session)) == values
             await call(session, 'set_env', {'values': {'ENV_TEST': 'foreign'}}, 'two')
@@ -129,7 +140,8 @@ async def main():
 
         # New MCP process and a different runtime session retain conversation ownership.
         async with connect() as session:
-            assert await call(session, 'get_bashrc') == {'path': str(session_rc)}
+            assert await call(session, 'list_bashrc') == {'refs': [first]}
+            assert await call(session, 'get_bashrc', {'ref': first}) == {'ref': first, 'script': ':\n'}
             assert json.loads(await run(session)) == values
             await asyncio.gather(call(session, 'set_env', {'values': {'A': 'a'}}),
                                  call(session, 'set_env', {'values': {'B': 'b'}}))
@@ -141,17 +153,16 @@ async def main():
             hook = subprocess.run(config['hooks'][0]['command'], shell=True, env=env,
                                   input=json.dumps(event), text=True, capture_output=True, check=True)
             assert json.loads(hook.stdout.splitlines()[1]) == current
-            assert json.dumps(str(session_rc)) in hook.stdout
-            assert await call(session, 'set_bashrc', {'path': None}) == {'path': None}
-            assert await call(session, 'get_bashrc') == {'path': None}
-            session_rc.unlink()
+            assert first in hook.stdout and second not in hook.stdout
+            assert await call(session, 'delete_bashrc', {'ref': first}) == {'deleted': first}
+            assert await call(session, 'list_bashrc') == {'refs': []}
             remaining = await call(session, 'unset_env', {'names': [*current, 'ABSENT']})
             assert remaining == {'variables': {}}
             actual = json.loads(await run(session))
             assert actual['ENV_TEST'] == 'inherited' and actual['ENV_EMPTY'] is None, actual
             assert (await call(session, 'list_env', owner='two'))['variables'] == {'ENV_TEST': 'foreign'}
         assert space.delete()['deleted'] == [ref]
-    print('PASS: session bashrc registration/clear, aliases, source failure, live edits, isolation, restart, hook; BASH_ENV and environment regression')
+    print('PASS: Bash source registration, ordered execution, edit/delete by ref, aliases, source failure, isolation, restart, hook; BASH_ENV and environment regression')
 
 
 if __name__ == '__main__':

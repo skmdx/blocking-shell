@@ -49,13 +49,16 @@ Bashはどちらのモードでも`BASH_ENV`が指すファイルを読み込む
 未指定なら起動元の`BASH_ENV`を継承する。会話固有の`set_env`はこれらより優先する。
 対象はユーザー設定のトップレベルにある`BASH_ENV`のみで、プロジェクト設定・
 profile・CLIの上書きは参照しない。alias・関数・環境変数は指定したbashrcにまとめる。
-会話専用の追加設定は`set_bashrc(path="/absolute/path/to/bashrc")`で登録する。
-Bashの通常の起動処理（`BASH_ENV`を含む）の後、`cmd`の前に毎回そのファイルをsourceする。
-ファイル内容の変更は次回の`run`・`rerun`から反映し、読み込み失敗時はコマンドを実行しない。
-登録中はBashを使用する。他のシェルはエラーとなる。aliasを使う場合はファイル内で
-`shopt -s expand_aliases`を設定する。対話待ちは入れない。
-`get_bashrc()`で登録パスを確認し、`set_bashrc(path=null)`で解除する（ファイルは削除しない）。
-登録は環境変数と同様に会話単位で保存され、MCP再接続・圧縮後も維持する。
+会話専用の追加設定は`set_bashrc(script="export CC=clang")`でBash本文を直接登録する。
+複数登録でき、各登録の戻り値`ref`で識別する。
+`set_bashrc(ref="...", script="...")`で本文を置き換え、`delete_bashrc(ref="...")`で削除する。
+`list_bashrc()`は登録順のID一覧、`get_bashrc(ref="...")`は指定した本文を返す。
+未知のIDや別の会話のIDはエラーとなる。編集しても登録順は変わらない。
+Bashの通常の起動処理（`BASH_ENV`を含む）の後、`cmd`の前に登録順でsourceする。
+sourceが非ゼロで終了した場合は後続のスクリプトとコマンドを実行しない。
+編集・削除は次回の`run`・`rerun`から反映する。登録中はBashを使用する。
+aliasを使う場合は本文で`shopt -s expand_aliases`を設定し、対話待ちは入れない。
+本文は会話単位で保存され、MCP再接続・圧縮後も維持する。
 他の会話・他のツール・実行中のコマンドには適用しない。
 標準入力は閉じ、stdout/stderrを結合ログへ保存する。PTY・対話入力は提供しない。
 `max_output_tokens`はログ末尾だけの上限で既定1000。結果JSONのメタデータは対象外。
@@ -72,7 +75,7 @@ MCP再接続後も維持する。保存先はホスト環境の`BLOCKING_SHELL_S
 他の会話・他のツール・実行中のコマンド・systemdの管理操作には適用しない。
 一回だけの指定は`CC=clang make`のように`cmd`内へ書く。
 転送する基底変数は`.mcp.json`の`env_vars`で指定し、別シェルでの変更は自動継承しない。
-自動コンテキスト圧縮後は、`SessionStart`フックが設定した名前と値をモデルへ注入する。
+自動コンテキスト圧縮後は、`SessionStart`フックが環境変数の名前と値、および登録したBashスクリプトのIDをモデルへ注入する。
 導入時に`/hooks`でフックを確認・信頼する。Codex 0.162.0の手動圧縮APIでは発火しない。
 CPU時間は秒、最大メモリとブロックIO量はバイトで、子孫を含むunit cgroupの回収前の値。
 取得不能は`null`となる。統計取得・回収に失敗した場合だけ`accounting_error`・`cleanup_error`を返す。

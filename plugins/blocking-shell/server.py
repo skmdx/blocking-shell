@@ -53,31 +53,35 @@ def command_overrides(state: SessionState) -> dict[str, str]:
     return overrides
 
 
-def validate_bashrc(path: str) -> str:
-    file = Path(path)
-    if not file.is_absolute() or not file.is_file() or not os.access(file, os.R_OK):
-        raise ValueError('bashrc must be an existing readable absolute file path')
-    return str(file)
-
-
 @mcp.tool(structured_output=False, annotations=ToolAnnotations(openWorldHint=False))
-def set_bashrc(path: str | None, ctx: Context) -> dict:
-    """Register an additional Bash startup file for this conversation; null clears it.
+def set_bashrc(script: str, ctx: Context, ref: str | None = None) -> dict:
+    """Register Bash source text for this conversation, or replace it by ref.
 
-    Takes an existing readable absolute path, not file contents. Each run/rerun
-    sources the current file after normal startup, before cmd. Requires Bash.
-    Survives reconnects and compaction; other conversations and running jobs are
-    unaffected. Source failure stops the command. Returns the registered path.
+    Omit ref to append a script and receive its ID; editing preserves its order.
+    Each run/rerun sources scripts in registration order after normal Bash startup,
+    before cmd. Nonzero source status stops execution. Survives reconnects and
+    compaction; other conversations and running jobs are unaffected.
     """
-    if path is not None:
-        path = validate_bashrc(path)
-    return {'path': session_state(ctx).bashrc(path=path, update=True)}
+    return {'ref': session_state(ctx).set_script(script, ref)}
 
 
 @mcp.tool(structured_output=False, annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False))
-def get_bashrc(ctx: Context) -> dict:
-    """Return this conversation's registered bashrc path, or null when unset."""
-    return {'path': session_state(ctx).bashrc()}
+def get_bashrc(ref: str, ctx: Context) -> dict:
+    """Read a registered Bash script by ref in this conversation."""
+    return session_state(ctx).scripts(ref)[0]
+
+
+@mcp.tool(structured_output=False, annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False))
+def list_bashrc(ctx: Context) -> dict:
+    """List this conversation's Bash script refs in execution order, without source text."""
+    return {'refs': [item['ref'] for item in session_state(ctx).scripts()]}
+
+
+@mcp.tool(structured_output=False, annotations=ToolAnnotations(destructiveHint=True, openWorldHint=False))
+def delete_bashrc(ref: str, ctx: Context) -> dict:
+    """Delete a Bash script by ref from this conversation; unknown refs are errors."""
+    session_state(ctx).delete_script(ref)
+    return {'deleted': ref}
 
 
 @mcp.tool(structured_output=False, annotations=ToolAnnotations(openWorldHint=False))
@@ -204,14 +208,11 @@ async def run(
     environment = dict(os.environ)
     state = session_state(ctx)
     overrides = command_overrides(state)
-    bashrc = state.bashrc()
-    command = cmd
-    if bashrc is not None:
+    scripts = state.scripts()
+    if scripts:
         if (Path(executable).name == 'sh' or
                 Path(shutil.which(executable) or executable).resolve().name != 'bash'):
-            raise ValueError('A session bashrc requires shell Bash; select Bash or clear set_bashrc')
-        bashrc = validate_bashrc(bashrc)
-        command = f'source {shlex.quote(bashrc)} || exit $?\n{cmd}'
+            raise ValueError('Registered bashrc scripts require Bash; select Bash or delete the scripts')
     with result_directory(scratch_ref) as out:
         expanded_workdir = workdir
         for variable in ("$BLOCKING_SHELL_SCRATCH_DIR", "${BLOCKING_SHELL_SCRATCH_DIR}"):
@@ -221,6 +222,12 @@ async def run(
         work = Path(expanded_workdir)
         if not work.is_absolute() or not work.is_dir():
             raise ValueError("workdir must be an existing absolute directory after scratch expansion")
+        startup = []
+        for item in scripts:
+            file = out / (item['ref'] + '.bash')
+            file.write_text(item['script'], encoding='utf-8')
+            startup.append(f'source {shlex.quote(str(file))} || exit $?\n')
+        command = ''.join(startup) + cmd
         state.command(dict(cmd=cmd, workdir=workdir, scratch_ref=scratch_ref,
                            max_output_tokens=max_output_tokens, shell=executable, login=login,
                            timeout_seconds=timeout_seconds, memory_max_mib=memory_max_mib))
