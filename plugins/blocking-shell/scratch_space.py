@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import shutil
 import stat
+import time
 import uuid
 from word_ids import WORDS, new_id
 
@@ -57,6 +58,7 @@ class ScratchSpace:
             for _ in range(100):
                 path = self.root / new_id(records.__contains__)
                 try:
+                    created_at_ms = time.time_ns() // 1_000_000
                     path.mkdir(mode=0o700)
                     break
                 except FileExistsError:
@@ -68,6 +70,7 @@ class ScratchSpace:
                 (self.state / f'{ref}.lock').touch(mode=0o600)
                 info = path.stat()
                 records[ref] = dict(name=path.name, session=self.session,
+                                    created_at_ms=created_at_ms,
                                     identity=[info.st_dev, info.st_ino])
                 self._save(records)
             except BaseException:
@@ -135,6 +138,17 @@ class ScratchSpace:
             if len(selected) > limit:
                 result['next_after'] = selected[limit - 1]
         return {key: value for key, value in result.items() if value or key == 'directories'}
+
+    def delete_created_between(self, start_ms: int, end_ms: int) -> dict:
+        """Delete known creations in (start, end], preserving normal lease checks."""
+        if start_ms > end_ms:
+            raise ValueError('invalid scratch cleanup interval')
+        with self._registry() as records:
+            refs = [ref for ref, record in records.items()
+                    if record['session'] == self.session and not record.get('deleted')
+                    and 'created_at_ms' in record
+                    and start_ms < record['created_at_ms'] <= end_ms]
+        return self.delete(refs) if refs else {'deleted': []}
 
     def delete(self, refs: list[str] | None = None) -> dict:
         result: dict = dict(deleted=[], missing=[], skipped_active=[], errors={})
