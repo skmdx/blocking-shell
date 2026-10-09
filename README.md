@@ -32,7 +32,11 @@ codex plugin add blocking-shell@blocking-shell
 `rerun()`は同じ会話で直前に受け付けたコマンドを、現在の環境設定で再実行する。
 実行条件は引き継ぎ、ログは新規作成する。保存先を変更する場合は
 `rerun(scratch_ref="...")`を使う。履歴はMCP再接続・圧縮後も維持される。
-通信失敗時は、実行状況と保存結果を確認してから再実行を判断する。
+通信失敗時は`result()`で最後に受け付けた実行を確認してから再実行を判断する。
+既知の実行には`run`・`rerun`が返した`run_ref`を渡せる。同時実行時の「最後」は受付順。
+`state=finished`なら通常実行と同じ要約を返す。それ以外は`running`・`finishing`・
+`unknown`（結果未確定）・`expired`（保存先削除済み）を区別し、成功を推測しない。
+この対応記録は更新後の実行から作成される。過去のログを自動探索・登録はしない。
 
 | 設定 | 既定値・動作 |
 | --- | --- |
@@ -60,7 +64,11 @@ codex plugin add blocking-shell@blocking-shell
 | --- | --- |
 | 1回だけの環境変数 | `cmd`に`CC=clang make`のように書く |
 | 会話内で共通の環境変数 | `set_env(values={"CC": "clang"})`で設定し、`list_env()`・`unset_env(names=["CC"])`で確認・解除する |
-| 会話内で共通のBash処理 | `set_bashrc(script="...")`で登録し、返された`ref`で取得・置換・削除する |
+| 会話内で共通のBash処理 | `set_bashrc(script="...")`で登録し、返された`ref`で置換・削除する。本文は`get_bashrc(refs=[...])`でまとめて取得する |
+
+環境変数の更新応答は変更した名前を返し、全値は`list_env`で確認する。
+Bash本文は対象別に成功・失敗を返す。`next_cursor`があれば同じ`refs`で続きを取得する。
+途中で対象の本文が変わった場合は継続を拒否するため、先頭から読み直す。
 
 会話の設定はMCP再接続・圧縮後も維持され、以後の`run`・`rerun`へ適用する。
 他の会話・他のツール・実行中のコマンドには適用しない。
@@ -70,7 +78,8 @@ codex plugin add blocking-shell@blocking-shell
 
 状態の保存先は`$XDG_STATE_HOME/blocking-shell`（既定`~/.local/state/blocking-shell`）。
 ホスト環境の`BLOCKING_SHELL_STATE_DIR`で変更できる。
-自動圧縮後は`SessionStart`フックが環境変数の名前と値、Bash処理のIDをモデルへ伝える。
+自動圧縮後は`SessionStart`フックが環境変数の名前、Bash処理のIDをモデルへ伝える。
+保存された値は引き続きコマンドへ適用され、通常実行のために再取得する必要はない。
 Codex 0.162.0の手動圧縮APIではこのフックは発火しない。
 
 ## 開発時の検証
@@ -81,6 +90,7 @@ Codex 0.162.0の手動圧縮APIではこのフックは発火しない。
 uv run --script plugins/blocking-shell/tests/test_mcp.py /absolute/scratch
 TMPDIR=/absolute/scratch uv run --script plugins/blocking-shell/tests/test_environment.py
 TMPDIR=/absolute/scratch uv run --script plugins/blocking-shell/tests/test_rerun.py
+TMPDIR=/absolute/scratch uv run --script plugins/blocking-shell/tests/test_recovery.py
 ```
 
 インストール済みPluginを実Codexで確認する試験は、Codex利用枠を使用する。

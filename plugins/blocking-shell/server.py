@@ -5,6 +5,7 @@
 """Run foreground shell commands in one blocking MCP request."""
 import asyncio
 from contextlib import contextmanager
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -66,9 +67,18 @@ def set_bashrc(script: str, ctx: Context, ref: str | None = None) -> dict:
 
 
 @mcp.tool(structured_output=False, annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False))
-def get_bashrc(ref: str, ctx: Context) -> dict:
-    """Read a registered Bash script by ref in this conversation."""
-    return session_state(ctx).scripts(ref)[0]
+def get_bashrc(
+    refs: Annotated[list[str], Field(min_length=1, max_length=100)],
+    ctx: Context,
+    cursor: str | None = None,
+) -> dict:
+    """Read selected Bash scripts in input order, with per-ref errors.
+
+    Returns up to 16000 source characters; offsets are character positions.
+    Repeat the same refs with next_cursor until null. A changed selection fails
+    continuation: restart without cursor. Missing refs do not discard successes.
+    """
+    return session_state(ctx).script_page(refs, cursor)
 
 
 @mcp.tool(structured_output=False, annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False))
@@ -90,10 +100,11 @@ def set_env(values: dict[str, str], ctx: Context) -> dict:
 
     Values are literal strings. Other variables stay unchanged. Survives MCP
     reconnects and compaction; applies only to blocking-shell, not other tools.
-    Stored values are injected into model context after automatic compaction.
-    Returns all tool-configured overrides. Running commands are unaffected.
+    Names are restored to model context after automatic compaction.
+    Returns set names; list_env reads values. Running commands are unaffected.
     """
-    return {'variables': session_state(ctx).update(values, [])}
+    changed = session_state(ctx).update(values, [])
+    return {'set': changed.get('set', [])}
 
 
 @mcp.tool(structured_output=False, annotations=ToolAnnotations(destructiveHint=True, openWorldHint=False))
@@ -102,9 +113,9 @@ def unset_env(names: list[str], ctx: Context) -> dict:
 
     Subsequent runs fall back to Codex BASH_ENV configuration or inherited values.
     Does not unset the server's own environment or change running commands.
-    Returns remaining overrides.
+    Returns removed and missing names; list_env reads remaining values.
     """
-    return {'variables': session_state(ctx).update({}, names)}
+    return session_state(ctx).update({}, names)
 
 
 @mcp.tool(structured_output=False, annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False))
@@ -120,7 +131,10 @@ def list_env(ctx: Context) -> dict:
 def result_directory(scratch_ref: str):
     with ScratchSpace().lease(scratch_ref) as logs:
         out = create_directory(logs, prefix="blocking-shell-")
-        yield out
+        # Unlike a PID, this ownership proof cannot survive a dead server or PID reuse.
+        with (out / 'active.lock').open('wb') as owner:
+            fcntl.flock(owner, fcntl.LOCK_EX)
+            yield out
 
 
 def output_tail(log: Path, budget: int) -> tuple[str, int, bool]:
@@ -162,6 +176,7 @@ def counter(properties: dict[str, str], name: str) -> int | None:
 
 def summarize(result: dict) -> dict:
     summary = {key: result[key] for key in (
+        "run_ref", "state",
         "status", "exit_code", "elapsed_seconds", "cpu_seconds", "memory_peak_bytes",
         "io_read_bytes", "io_write_bytes", "output_tail", "output_truncated",
         "log_path", "result_path")}
@@ -172,6 +187,51 @@ def summarize(result: dict) -> dict:
             result[key] is not None for key in ("accounting_error", "cleanup_error")):
         summary.update({key: result[key] for key in ("unit", "unit_result", "systemd_log_path")})
     return summary
+
+
+@mcp.tool(structured_output=False, annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False))
+async def result(ctx: Context, run_ref: str | None = None) -> dict:
+    """Recover an execution result after a lost response or reconnection.
+
+    Omit run_ref for this conversation's last accepted execution (not last completed).
+    Finished results match run/rerun summaries. Otherwise state is running, finishing,
+    unknown, or expired; no exit code is inferred. This never reruns a command.
+    """
+    record = session_state(ctx).execution(run_ref)
+    reference = record['run_ref']
+    try:
+        with ScratchSpace().lease(record['scratch_ref']) as logs:
+            out = logs / ('blocking-shell-' + reference)
+            saved = out / 'result.json'
+            if not out.is_dir():
+                return dict(run_ref=reference, state='expired')
+            try:
+                if saved.exists():
+                    return summarize(json.loads(saved.read_text()))
+                code, output = await control(dict(os.environ), 'show', record['unit'],
+                                             '--property=LoadState,ActiveState,SubState')
+                finalizing = False
+                with (out / 'active.lock').open('rb') as owner:
+                    try:
+                        fcntl.flock(owner, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except BlockingIOError:
+                        finalizing = True
+                # Finalization can finish while systemd is being queried.
+                if saved.exists():
+                    return summarize(json.loads(saved.read_text()))
+            except (OSError, json.JSONDecodeError) as error:
+                return dict(run_ref=reference, state='unknown', reason=str(error))
+            properties = dict(line.split('=', 1) for line in output.splitlines() if '=' in line)
+            if code == 0 and properties.get('LoadState') == 'loaded':
+                if properties.get('SubState') in ('start', 'running'):
+                    return dict(run_ref=reference, state='running')
+                if finalizing and (properties.get('ActiveState') == 'deactivating' or
+                                   properties.get('SubState') == 'exited'):
+                    return dict(run_ref=reference, state='finishing')
+            return dict(run_ref=reference, state='unknown',
+                        reason='No saved result and no confirmed active execution')
+    except (ValueError, FileNotFoundError):
+        return dict(run_ref=reference, state='expired')
 
 
 @mcp.tool(structured_output=False, annotations=ToolAnnotations(destructiveHint=True, openWorldHint=True))
@@ -201,6 +261,7 @@ async def run(
     paths and cgroup resource statistics. accounting_error and cleanup_error appear
     only on failure; unavailable counters remain null. Full metadata and applied
     limits are saved at result_path; abnormal results also include systemd diagnostics.
+    run_ref identifies this execution for result() after reconnection.
     Timeout, cancellation and memory exhaustion stop the command group.
     Use scratch.delete after the saved results are no longer needed.
     """
@@ -228,12 +289,14 @@ async def run(
             file.write_text(item['script'], encoding='utf-8')
             startup.append(f'source {shlex.quote(str(file))} || exit $?\n')
         command = ''.join(startup) + cmd
-        state.command(dict(cmd=cmd, workdir=workdir, scratch_ref=scratch_ref,
-                           max_output_tokens=max_output_tokens, shell=executable, login=login,
-                           timeout_seconds=timeout_seconds, memory_max_mib=memory_max_mib))
         log = out / "output.log"
         log.touch()
         unit = out.name + ".service"
+        run_ref = out.name.removeprefix('blocking-shell-')
+        state.command(dict(cmd=cmd, workdir=workdir, scratch_ref=scratch_ref,
+                           max_output_tokens=max_output_tokens, shell=executable, login=login,
+                           timeout_seconds=timeout_seconds, memory_max_mib=memory_max_mib),
+                      dict(run_ref=run_ref, scratch_ref=scratch_ref, unit=unit))
         manager_log = out / "systemd.log"
         started = time.monotonic()
         status = "completed"
@@ -286,7 +349,7 @@ async def run(
                     cpu_ns = counter(properties, "CPUUsageNSec")
                     size = log.stat().st_size
                     tail, token_count, truncated = output_tail(log, max_output_tokens)
-                    result.update(status=status, exit_code=exit_code,
+                    result.update(run_ref=run_ref, state='finished', status=status, exit_code=exit_code,
                                   timeout_seconds=timeout_seconds,
                                   cpu_seconds=cpu_ns / 1e9 if cpu_ns is not None else None,
                                   memory_peak_bytes=counter(properties, "MemoryPeak"),
@@ -304,7 +367,9 @@ async def run(
                                   output_tokens=token_count, output_token_encoding=encoding.name,
                                   output_truncated=truncated,
                                   log_path=str(log), result_path=str(out / "result.json"))
-                    (out / "result.json").write_text(json.dumps(result, indent=2) + "\n")
+                    pending = out / 'result.pending'
+                    pending.write_text(json.dumps(result, indent=2) + "\n")
+                    pending.replace(out / 'result.json')
     return summarize(result)
 
 
@@ -320,7 +385,7 @@ async def rerun(
     MCP reconnects and compaction, including failed or cancelled runs. Invalid requests
     do not replace it. Concurrent runs are ordered by acceptance, not completion.
     With no previous command, or a deleted scratch reference, fails without executing.
-    Inspect the prior result after transport failures before requesting a rerun.
+    Call result() after transport failures before requesting a rerun.
     """
     arguments = session_state(ctx).command()
     if scratch_ref is not None:

@@ -3,82 +3,90 @@ name: blocking-shell
 description: Run long builds, test suites, and other foreground shell commands through a single blocking MCP call. Blocking until completion avoids polling and can reduce token use compared with exec_command for long-running tasks.
 ---
 
+## Run and assess
+
 Call `run` directly, outside code-mode cells, for authorized long-running commands.
-Announce the command first; the call waits until completion without a poll handle.
-Supply `scratch_ref` from Scratch's `create` and an existing directory as `workdir`.
-`workdir` accepts an absolute path or `$BLOCKING_SHELL_SCRATCH_DIR`
-(also `${BLOCKING_SHELL_SCRATCH_DIR}`), optionally followed by `/subdir`.
-This prefix resolves from the selected `scratch_ref` on every run, including
-`rerun(scratch_ref=...)`; other variables and shell expressions are not expanded.
-Since `workdir` is supplied separately, prefer paths relative to it in `cmd`.
-Use absolute paths only when needed.
-Use `"$BLOCKING_SHELL_SCRATCH_DIR"` in `cmd` to access the directory selected by
-`scratch_ref`, for example `make > "$BLOCKING_SHELL_SCRATCH_DIR/build.log"`.
-It is set for each `run` and `rerun`, overriding inherited and `set_env` values.
-Keep jobs in the foreground and use noninteractive options.
+Announce the command first. Supply `cmd`, an existing `workdir`, and `scratch_ref`
+from Scratch's `create`. Keep commands in the foreground and noninteractive.
+The call waits for completion; normal use needs no subsequent status request.
 
-Call `rerun()` directly to repeat this conversation's last accepted command with
-the same workdir, shell, login setting, limits and output budget. It uses current
-environment overrides and writes fresh logs under the previous Scratch reference;
-pass `scratch_ref` to replace a deleted reference. Saved commands survive MCP
-reconnects and compaction, including failed or cancelled commands. Invalid requests
-do not replace them; concurrent requests are ordered by acceptance, not completion.
-Re-execution repeats side effects and requires the same authorization as `run`.
-Do not automatically retry memory exhaustion or an uncertain transport failure.
+Prefer paths relative to `workdir`. For work inside the selected Scratch directory,
+use `$BLOCKING_SHELL_SCRATCH_DIR` as `workdir`, optionally with a `/subdir`.
+The braced form also works; other variables and shell expressions are not expanded.
+In `cmd`, use `"$BLOCKING_SHELL_SCRATCH_DIR"` to access that directory.
+The tool supplies this variable on every run, overriding environment settings.
 
-If a command already started with `exec_command` runs longer than expected,
-replace repeated `write_stdin` polling with one direct `run` call using
-`cmd: "tail --pid=12345 -f /dev/null"` (GNU tail). Replace `12345` with the
-actual OS PID of the running command or its wrapper that waits for all work,
-not the `exec_command` session ID or a persistent interactive shell. Obtain the
-PID from existing output or one targeted process lookup. Supply `workdir` and
-`scratch_ref` as usual; do not restart the original command.
-After the wait returns, call `write_stdin` once on the original session to collect
-its final output and exit code. A successful tail exit only confirms that the
-PID disappeared, not that the command succeeded. The wait does not move the
-original job into blocking-shell's cgroup: its limits, timeout, cancellation and
-statistics apply only to the waiting process.
+Assess `status` and `exit_code`. `state: finished` means the result is final,
+not that the command succeeded. Read `log_path` or `result_path` only when the
+returned summary leaves a question unanswered. Log truncation preserves the full
+log on disk. Unavailable counters are null, not zero; IO measures block-device
+traffic including descendants. Inspect `accounting_error` or `cleanup_error`
+when present before relying on measurements or cleanup.
 
-The execution deadline is six hours by default, including when omitted.
-Set `timeout_seconds` when a different deadline is needed; expiry stops the
-command and descendants. Do not shorten it from a guessed build duration.
-Normally omit `shell` and `login`. Select `shell` when command syntax requires it;
-set `login: false` to skip login startup files. Bash reads `BASH_ENV` in either
-mode. Each run reads `shell_environment_policy.set.BASH_ENV` from
-`$CODEX_HOME/config.toml` (default `~/.codex/config.toml`), falling back to inherited
-`BASH_ENV` when absent. Only the top-level user setting is read, not project,
-profile or CLI overrides. Put shared aliases, functions and environment settings
-in the Bash file selected by `BASH_ENV`; no separate `set_env` call is needed. Conversation `set_env` values
-take precedence, including subsequent `rerun` calls.
-Use `set_env(values={...})` for environment overrides shared by this conversation's
-subsequent `run` calls; `list_env()` returns them and `unset_env(names=[...])`
-removes overrides, restoring inherited values if present. Values survive MCP
-reconnects and are injected into model context after automatic compaction.
-They apply only to blocking-shell commands, not other tools, other conversations,
-or already-running commands. Commands otherwise inherit the server's startup
-environment. Put per-command assignments in `cmd`; later changes in another
-shell are not inherited. Login startup files can still change the environment.
+Normally keep the default execution deadline and memory limit. Change them for
+known execution requirements, not a guessed build duration. Memory exhaustion,
+timeout and cancellation stop the command group. Do not automatically retry
+memory exhaustion or bypass its limit.
+After using the results, call Scratch's `delete`. Active leases prevent deletion;
+retry skipped or failed cleanup after the work has ended.
 
-Use `set_bashrc(script="...")` to register Bash source text for this conversation
-and receive its `ref`. Multiple scripts run in registration order after normal
-Bash startup (including `BASH_ENV`) and before `cmd`. A nonzero source status stops
-later scripts and the command. Runs with registered scripts require Bash.
-`set_bashrc(ref="...", script="...")` replaces the text without changing its order;
-`delete_bashrc(ref="...")` removes it. Unknown or foreign refs are errors.
-`list_bashrc()` lists refs in execution order without source text;
-`get_bashrc(ref="...")` reads the selected script. Use `shopt -s expand_aliases`
-for aliases and keep scripts noninteractive. Source text survives reconnects and
-compaction; edits/deletions affect subsequent `run`/`rerun`, not running jobs.
+## Recover a result or repeat a command
 
-Assess `status` and `exit_code`. Inspect saved log excerpts only when the returned
-tail does not settle the result. After a transport failure, inspect the process
-and saved result before rerunning. `accounting_error` and `cleanup_error` appear
-only on failure; inspect them before relying on measurements or cleanup. Unavailable counters are null, not
-zero; IO counts block-device traffic, including descendants, rather than cached IO.
+After a lost response or reconnect, call `result()` before considering a rerun.
+It returns the last accepted execution in this conversation. With concurrent
+runs, acceptance order differs from completion order; inspect the returned
+`run_ref`. Use `result(run_ref=...)` for a known execution.
 
-The log tail defaults to 1000 tokens; `max_output_tokens` changes that limit,
-excluding metadata. `result_path` retains full statistics, applied limits, and
-diagnostics. Read it only when the returned summary leaves a question unanswered.
+A finished result has the same summary as `run`. Otherwise `state` distinguishes
+`running`, `finishing`, `unknown` and `expired`. Missing units or saved results
+do not establish success. No command is restarted and no job recovery occurs.
+Use this for exceptional recovery, not periodic polling.
 
-Call Scratch's `delete` with the reference after using the results. Active runs
-hold a lease and are skipped; failed deletions remain retryable.
+`rerun()` repeats the last accepted command with its saved execution conditions,
+current environment settings and fresh logs. Pass `scratch_ref` to replace a
+deleted storage reference. History survives reconnects and compaction; invalid
+requests do not replace it. Re-execution repeats side effects and requires the
+same authorization as `run`.
+
+## Configure commands
+
+Keep shared aliases, functions and environment settings in the Bash file selected
+by top-level `shell_environment_policy.set.BASH_ENV` in the user
+`$CODEX_HOME/config.toml` (default `~/.codex/config.toml`). Each run rereads this
+setting, falling back to inherited `BASH_ENV` when absent. Project, profile and
+CLI overrides are not read. Bash reads the file with either login setting.
+
+Use per-command assignments in `cmd`. For conversation overrides, use `set_env`
+and `unset_env`; their responses identify changed names. `list_env` reads all
+configured values. Overrides survive reconnects and apply to subsequent
+`run`/`rerun` only. They take precedence over inherited values and the user
+configuration, but shell startup files may change them. Later changes in another
+shell are not inherited. Compaction restores configured names, not their values;
+commands still receive the stored values without an extra read.
+
+For conversation-specific Bash startup code, use `set_bashrc(script=...)`.
+Keep its returned `ref` to replace or delete it. Scripts run in registration order,
+after ordinary Bash startup and before `cmd`; a nonzero source status stops the
+remaining scripts and command. Registered scripts require Bash. Use
+`shopt -s expand_aliases` for aliases; do not introduce interactive prompts.
+
+`list_bashrc` lists refs in execution order. `get_bashrc(refs=[...])` reads selected
+bodies together, preserving input order and errors per ref. If `next_cursor` is
+non-null, repeat the same selection with that cursor and concatenate each body's
+fragments by character offset. A changed selection rejects continuation: restart
+without the cursor. Scripts persist across reconnects and compaction; changes
+affect subsequent commands, not running jobs.
+
+## Wait for work started with exec_command
+
+If an existing command runs longer than expected, one direct `run` call with
+`cmd: "tail --pid=12345 -f /dev/null"` (GNU tail) can replace repeated polling.
+Use the actual OS PID of the command or a wrapper that waits for all its work,
+not an exec session ID or persistent shell. Obtain it from existing output or
+one targeted lookup, and supply `workdir` and `scratch_ref` normally.
+Do not restart the original command.
+
+After the wait returns, call `write_stdin` once on the original session for its
+output and exit code. A successful tail exit only confirms that the PID vanished.
+The original job stays outside blocking-shell's cgroup; the wait's limits,
+cancellation and statistics apply only to the waiting process.

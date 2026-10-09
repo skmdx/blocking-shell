@@ -1,4 +1,4 @@
-"""Restore tool-configured environment values after automatic compaction."""
+"""Restore configuration references after automatic compaction."""
 import json
 from pathlib import Path
 import sys
@@ -12,8 +12,9 @@ if __name__ == '__main__':
     if event.get('hook_event_name') == 'SessionStart' and event.get('source') == 'compact':
         state = SessionState(event.get('session_id'))
         values = state.list()
-        print('Environment overrides set through blocking-shell for this conversation:')
-        print(json.dumps(values, ensure_ascii=False, separators=(',', ':')))
+        if values:
+            print('Blocking-shell environment override names (list_env reads values):')
+            print(json.dumps(list(values), ensure_ascii=False, separators=(',', ':')))
         refs = [item['ref'] for item in state.scripts()]
         if refs:
             print('Blocking-shell bashrc refs in execution order (get_bashrc reads source): ' +

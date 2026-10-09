@@ -20,14 +20,14 @@ def main():
     root.mkdir(parents=True, exist_ok=False)
     environment = dict(os.environ, SCRATCH_ROOT=str(root), TERM="xterm-256color")
     (root / "hello.c").write_text('#include <stdio.h>\nint main(void) { puts("BUILD_OK"); }\n')
-    (root / "Makefile").write_text('all:\n\ttest -t 0 && test -t 1 && test -t 2\n\ttest "$$TERM" = xterm-256color\n\tsleep 65\n\t$(CC) hello.c -o hello\n\t./hello\n')
+    (root / "Makefile").write_text('all:\n\ttest ! -t 0 && test ! -t 1 && test ! -t 2\n\ttest "$$TERM" = xterm-256color\n\tsleep 65\n\t$(CC) hello.c -o hello\n\t./hello\n')
     subprocess.run(["git", "init", "-q", str(root)], check=True)
     prompt = f'''Test the installed blocking-shell plugin. This is an authorized test build.
 First use functions.exec to print typeof tools.mcp__blocking_shell__run and whether
 ALL_TOOLS contains that name. Do not run shell commands from functions.exec.
 Call scratch.create to obtain the temporary log reference.
 Then call the direct blocking-shell run MCP tool exactly once with cmd="make",
-scratch_ref=the ID returned by scratch.create, workdir={str(root)!r}, tty=true, login=false.
+scratch_ref=the ID returned by scratch.create, workdir={str(root)!r}, login=false.
 Use the plugin's default timeout without overriding it.
 Do not use exec_command, polling, or another command runner. After it returns,
 report the tool result briefly. Do not edit files or invoke other tools.'''

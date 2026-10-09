@@ -40,20 +40,23 @@ async def main():
                     await session.initialize()
                     yield session
 
-        arguments = dict(cmd='printf "%s|%s|%s\\n" "$0" "$PWD" "$RERUN_TEST"; echo x >> count',
+        arguments = dict(cmd='printf "%s|%s|%s\\n" "$0" "$PWD" "$RERUN_TEST"; echo x >> count; '
+                         'echo x >> "$BLOCKING_SHELL_SCRATCH_DIR/artifact"',
                          workdir=directory, scratch_ref=ref, shell='/bin/bash', login=False,
                          memory_max_mib=64, timeout_seconds=9, max_output_tokens=100)
-        arguments['cmd'] += '; echo x >> "$BLOCKING_SHELL_SCRATCH_DIR/artifact"'
         async with connect() as session:
             schemas = {t.name: t for t in (await session.list_tools()).tools}
             assert not schemas['rerun'].inputSchema.get('required')
             assert schemas['rerun'].annotations is not None
             assert schemas['rerun'].annotations.destructiveHint
             await call(session, 'rerun', error=True)
+            await call(session, 'result', error=True)
             await call(session, 'set_env', {'values': {'RERUN_TEST': 'before',
                                                      'BLOCKING_SHELL_SCRATCH_DIR': 'override-wrong'}})
             first = await call(session, 'run', arguments)
             assert first['exit_code'] == 0, first
+            assert await call(session, 'result') == first
+            await call(session, 'result', {'run_ref': first['run_ref']}, owner='two', error=True)
             assert (Path(scratch['path'])/'artifact').read_text() == 'x\n'
             await call(session, 'run', dict(arguments, workdir='relative'), error=True)
             await call(session, 'run', dict(arguments, memory_max_mib=0), error=True)
@@ -64,6 +67,7 @@ async def main():
 
         # New process, same conversation, updated environment, original settings.
         async with connect() as session:
+            assert await call(session, 'result') == first
             repeated = await call(session, 'rerun')
             assert repeated['exit_code'] == 0, repeated
             assert repeated['output_tail'] == f'/bin/bash|{directory}|after\n', repeated
@@ -76,6 +80,7 @@ async def main():
             assert result['accounting_error'] is None and result['cleanup_error'] is None
             assert (await call(session, 'rerun', owner='two'))['output_tail'] == 'foreign'
             assert space.delete()['deleted'] == [ref]
+            assert await call(session, 'result') == dict(run_ref=repeated['run_ref'], state='expired')
             await call(session, 'rerun', error=True)
             assert (root/'count').read_text() == 'x\nx\n'
             scratch = space.create()

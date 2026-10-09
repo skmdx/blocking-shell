@@ -38,7 +38,8 @@ async def main():
             async with ClientSession(reader, writer, read_timeout_seconds=timedelta(seconds=20)) as session:
                 await session.initialize()
                 schemas = {tool.name: tool.inputSchema for tool in (await session.list_tools()).tools}
-                assert set(schemas) == {"run", "rerun", "set_env", "unset_env", "list_env"}, schemas
+                assert set(schemas) == {"run", "rerun", "result", "set_env", "unset_env", "list_env",
+                                        "set_bashrc", "get_bashrc", "list_bashrc", "delete_bashrc"}, schemas
                 schema = schemas["run"]
                 assert set(schema["required"]) == {"cmd", "workdir", "scratch_ref"}, schema
                 assert schema["properties"]["timeout_seconds"]["default"] == 21600
@@ -58,6 +59,9 @@ async def main():
                     content = response.content[0]
                     assert isinstance(content, TextContent)
                     summary = json.loads(content.text)
+                    recovered = await session.call_tool('result', {'run_ref': summary['run_ref']})
+                    assert isinstance(recovered.content[0], TextContent)
+                    assert not recovered.isError and json.loads(recovered.content[0].text) == summary
                     assert response.structuredContent is None
                     result = json.loads(Path(summary["result_path"]).read_text())
                     assert all(result[k] == v for k, v in summary.items())
@@ -186,6 +190,9 @@ async def main():
                 assert not (root / "detached-escaped").exists()
                 reports = [json.loads(p.read_text()) for p in logs.glob("*/result.json")]
                 assert any(r["status"] == "cancelled" for r in reports), reports
+                recovered = await session.call_tool('result')
+                assert isinstance(recovered.content[0], TextContent)
+                assert json.loads(recovered.content[0].text)['status'] == 'cancelled'
 
                 task = asyncio.create_task(run("echo active > scratch-ready; sleep 1; echo finished"))
                 while not (root / 'scratch-ready').exists():

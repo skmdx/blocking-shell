@@ -70,7 +70,7 @@ async def main():
                   'ENV_EMPTY': '', 'XDG_RUNTIME_DIR': '/job-only-runtime'}
         async with connect() as session:
             assert set(t.name for t in (await session.list_tools()).tools) == {
-                'run', 'rerun', 'set_env', 'unset_env', 'list_env',
+                'run', 'rerun', 'result', 'set_env', 'unset_env', 'list_env',
                 'set_bashrc', 'get_bashrc', 'list_bashrc', 'delete_bashrc'}
             assert await call(session, 'list_bashrc') == {'refs': []}
             for login in (False, True):
@@ -97,12 +97,16 @@ async def main():
             second = (await call(session, 'set_bashrc', {'script': second_script}))['ref']
             assert first != second
             assert await call(session, 'list_bashrc') == {'refs': [first, second]}
-            assert await call(session, 'get_bashrc', {'ref': first}) == {'ref': first, 'script': script}
+            batch = await call(session, 'get_bashrc', {'refs': [second, 'missing', first]})
+            assert batch == {'items': [dict(ref=second, script=second_script, offset=0),
+                                      dict(ref='missing', error='Unknown bashrc reference in this conversation'),
+                                      dict(ref=first, script=script, offset=0)], 'next_cursor': None}
             await call(session, 'set_bashrc', {'script': '\0', 'ref': first}, error=True)
             await call(session, 'set_bashrc', {'script': ':', 'ref': 'missing'}, error=True)
             assert await call(session, 'list_bashrc', owner='two') == {'refs': []}
-            for tool, arguments in (('get_bashrc', {'ref': first}),
-                                    ('set_bashrc', {'ref': first, 'script': ':'}),
+            foreign_read = await call(session, 'get_bashrc', {'refs': [first]}, owner='two')
+            assert 'error' in foreign_read['items'][0]
+            for tool, arguments in (('set_bashrc', {'ref': first, 'script': ':'}),
                                     ('delete_bashrc', {'ref': first})):
                 await call(session, tool, arguments, owner='two', error=True)
             request = dict(cmd='session_probe', workdir=directory, scratch_ref=ref,
@@ -121,10 +125,10 @@ async def main():
             failed = await call(session, 'rerun')
             assert failed['exit_code'] == 7 and 'second' not in failed['output_tail'], failed
             assert await call(session, 'delete_bashrc', {'ref': second}) == {'deleted': second}
-            await call(session, 'get_bashrc', {'ref': second}, error=True)
+            assert 'error' in (await call(session, 'get_bashrc', {'refs': [second]}))['items'][0]
             await call(session, 'delete_bashrc', {'ref': second}, error=True)
             await call(session, 'set_bashrc', {'ref': first, 'script': ':\n'})
-            assert (await call(session, 'set_env', {'values': values}))['variables'] == values
+            assert await call(session, 'set_env', {'values': values}) == {'set': sorted(values)}
             assert json.loads(await run(session)) == values
             await call(session, 'set_env', {'values': {'ENV_TEST': 'foreign'}}, 'two')
             assert json.loads(await run(session, 'two'))['ENV_TEST'] == 'foreign'
@@ -141,7 +145,25 @@ async def main():
         # New MCP process and a different runtime session retain conversation ownership.
         async with connect() as session:
             assert await call(session, 'list_bashrc') == {'refs': [first]}
-            assert await call(session, 'get_bashrc', {'ref': first}) == {'ref': first, 'script': ':\n'}
+            assert await call(session, 'get_bashrc', {'refs': [first]}) == {
+                'items': [dict(ref=first, script=':\n', offset=0)], 'next_cursor': None}
+            large = '日本語😀\n' * 7000
+            await call(session, 'set_bashrc', {'ref': first, 'script': large})
+            selection = {'refs': [first, 'absent', first]}
+            page = await call(session, 'get_bashrc', selection)
+            stale = page['next_cursor']
+            pieces = []
+            while True:
+                pieces.extend(page['items'])
+                if page['next_cursor'] is None:
+                    break
+                page = await call(session, 'get_bashrc', dict(selection, cursor=page['next_cursor']))
+            assert ''.join(item.get('script', '') for item in pieces) == large * 2
+            assert sum('error' in item for item in pieces) == 1
+            await call(session, 'set_bashrc', {'ref': first, 'script': ':\n'})
+            await call(session, 'get_bashrc', dict(selection, cursor=stale), error=True)
+            await call(session, 'get_bashrc', {'refs': []}, error=True)
+            await call(session, 'get_bashrc', {'refs': [first], 'cursor': 'invalid'}, error=True)
             assert json.loads(await run(session)) == values
             await asyncio.gather(call(session, 'set_env', {'values': {'A': 'a'}}),
                                  call(session, 'set_env', {'values': {'B': 'b'}}))
@@ -152,12 +174,12 @@ async def main():
             event = dict(hook_event_name='SessionStart', source='compact', session_id='one')
             hook = subprocess.run(config['hooks'][0]['command'], shell=True, env=env,
                                   input=json.dumps(event), text=True, capture_output=True, check=True)
-            assert json.loads(hook.stdout.splitlines()[1]) == current
+            assert json.loads(hook.stdout.splitlines()[1]) == sorted(current)
             assert first in hook.stdout and second not in hook.stdout
             assert await call(session, 'delete_bashrc', {'ref': first}) == {'deleted': first}
             assert await call(session, 'list_bashrc') == {'refs': []}
             remaining = await call(session, 'unset_env', {'names': [*current, 'ABSENT']})
-            assert remaining == {'variables': {}}
+            assert remaining == {'removed': sorted(current), 'missing': ['ABSENT']}
             actual = json.loads(await run(session))
             assert actual['ENV_TEST'] == 'inherited' and actual['ENV_EMPTY'] is None, actual
             assert (await call(session, 'list_env', owner='two'))['variables'] == {'ENV_TEST': 'foreign'}
