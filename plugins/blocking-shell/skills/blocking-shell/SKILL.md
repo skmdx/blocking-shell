@@ -6,6 +6,8 @@ description: Run long builds, test suites, and other foreground shell commands t
 Call `run` directly, outside code-mode cells, for authorized long-running commands.
 Announce the command first; the call waits until completion without a poll handle.
 Supply the existing absolute `workdir` and `scratch_ref` from Scratch's `create`.
+Since `workdir` is supplied separately, prefer paths relative to it in `cmd`.
+Use absolute paths only when needed.
 Keep jobs in the foreground and use noninteractive options.
 
 Call `rerun()` directly to repeat this conversation's last accepted command with
