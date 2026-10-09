@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import pwd
 import time
+import tomllib
 from typing import Annotated
 
 import anyio
@@ -32,6 +33,24 @@ def session_state(ctx: Context) -> SessionState:
     return SessionState(values.get('threadId', os.environ.get('CODEX_THREAD_ID')))
 
 
+def command_overrides(state: SessionState) -> dict[str, str]:
+    # MCP processes do not inherit Codex's shell_environment_policy.set.
+    config = Path(os.environ.get('CODEX_HOME', Path.home()/'.codex')) / 'config.toml'
+    try:
+        with config.open('rb') as stream:
+            settings = tomllib.load(stream)
+    except FileNotFoundError:
+        settings = {}
+    bash_env = settings.get('shell_environment_policy', {}).get('set', {}).get('BASH_ENV')
+    overrides = {}
+    if bash_env is not None:
+        if not isinstance(bash_env, str) or '\0' in bash_env:
+            raise ValueError('shell_environment_policy.set.BASH_ENV must be a string without NUL')
+        overrides['BASH_ENV'] = bash_env
+    overrides.update(state.list())
+    return overrides
+
+
 @mcp.tool(structured_output=False, annotations=ToolAnnotations(openWorldHint=False))
 def set_env(values: dict[str, str], ctx: Context) -> dict:
     """Set or replace environment overrides for this conversation's subsequent runs.
@@ -48,8 +67,9 @@ def set_env(values: dict[str, str], ctx: Context) -> dict:
 def unset_env(names: list[str], ctx: Context) -> dict:
     """Remove named overrides from this conversation; absent names are harmless.
 
-    Subsequent runs fall back to inherited values, if any. Does not unset the
-    server's own environment or change running commands. Returns remaining overrides.
+    Subsequent runs fall back to Codex BASH_ENV configuration or inherited values.
+    Does not unset the server's own environment or change running commands.
+    Returns remaining overrides.
     """
     return {'variables': session_state(ctx).update({}, names)}
 
@@ -154,7 +174,7 @@ async def run(
     executable = shell or pwd.getpwuid(os.getuid()).pw_shell
     environment = dict(os.environ)
     state = session_state(ctx)
-    overrides = state.list()
+    overrides = command_overrides(state)
     with result_directory(scratch_ref) as out:
         expanded_workdir = workdir
         for variable in ("$BLOCKING_SHELL_SCRATCH_DIR", "${BLOCKING_SHELL_SCRATCH_DIR}"):

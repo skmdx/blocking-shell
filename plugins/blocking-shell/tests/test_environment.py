@@ -37,13 +37,18 @@ async def main():
         bash_env.write_text("env_probe() { printf 'inherited\\n'; }\n")
         override_env = root/'override env'
         override_env.write_text("env_probe() { printf 'override\\n'; }\n")
+        configured_env = root/'configured env'
+        configured_env.write_text("env_probe() { printf 'configured\\n'; }\n")
+        codex_home = root/'codex'
+        codex_home.mkdir()
+        codex_config = codex_home/'config.toml'
         config = json.loads((plugin/'.mcp.json').read_text())['mcpServers']['blocking-shell']
         assert 'BASH_ENV' in config['env_vars']
         space = ScratchSpace(root, 'one')
         ref = space.create()['scratch_ref']
         env = dict(os.environ, BLOCKING_SHELL_STATE_DIR=str(root/'data'), PLUGIN_ROOT=str(plugin),
                    SCRATCH_ROOT=directory, CODEX_THREAD_ID='fallback', ENV_TEST='inherited',
-                   BASH_ENV=str(bash_env))
+                   BASH_ENV=str(bash_env), CODEX_HOME=str(codex_home))
 
         @asynccontextmanager
         async def connect():
@@ -70,10 +75,17 @@ async def main():
                                shell='/bin/bash', login=login, memory_max_mib=64)
                 inherited = await call(session, 'run', request)
                 assert inherited['exit_code'] == 0 and inherited['output_tail'] == 'inherited\n', inherited
+                codex_config.write_text('[shell_environment_policy.set]\nBASH_ENV = ' +
+                                        json.dumps(str(configured_env)) + '\n')
+                configured = await call(session, 'rerun')
+                assert configured['exit_code'] == 0 and configured['output_tail'] == 'configured\n', configured
                 await call(session, 'set_env', {'values': {'BASH_ENV': str(override_env)}})
                 overridden = await call(session, 'rerun')
                 assert overridden['exit_code'] == 0 and overridden['output_tail'] == 'override\n', overridden
                 await call(session, 'unset_env', {'names': ['BASH_ENV']})
+                configured = await call(session, 'rerun')
+                assert configured['exit_code'] == 0 and configured['output_tail'] == 'configured\n', configured
+                codex_config.unlink()
                 restored = await call(session, 'rerun')
                 assert restored['exit_code'] == 0 and restored['output_tail'] == 'inherited\n', restored
             assert (await call(session, 'set_env', {'values': values}))['variables'] == values

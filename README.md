@@ -44,10 +44,11 @@ swapは禁止し、メモリ超過時はcgroup全体を停止する。上限を�
 `login=true`（既定）は`-lc`でログイン時の起動ファイルを読み込む。
 ログイン時の起動ファイルを読み込まない場合は`login=false`とし、`-c`で実行する。
 Bashはどちらのモードでも`BASH_ENV`が指すファイルを読み込む。
-起動元の`BASH_ENV`を継承し、`set_env(values={"BASH_ENV": "/absolute/path/to/bashrc"})`
-で会話ごとに上書きできる。`rerun`も現在の設定を使う。
-Codexの`shell_environment_policy.set`はMCPサーバーの起動環境を設定しないため、
-共用する場合はCodex起動元の環境にも設定するか、`set_env`で同じパスを指定する。
+`$CODEX_HOME/config.toml`（既定`~/.codex/config.toml`）の
+`[shell_environment_policy.set]`に指定した`BASH_ENV`を、`run`・`rerun`ごとに読み込む。
+未指定なら起動元の`BASH_ENV`を継承する。会話固有の`set_env`はこれらより優先する。
+対象はユーザー設定のトップレベルにある`BASH_ENV`のみで、プロジェクト設定・
+profile・CLIの上書きは参照しない。alias・関数・環境変数は指定したbashrcにまとめる。
 標準入力は閉じ、stdout/stderrを結合ログへ保存する。PTY・対話入力は提供しない。
 `max_output_tokens`はログ末尾だけの上限で既定1000。結果JSONのメタデータは対象外。
 通常は終了状態・終了コード・経過時間・CPU/メモリ/IO統計・ログ末尾・切詰め有無と、
