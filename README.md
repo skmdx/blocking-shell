@@ -87,4 +87,29 @@ python3 plugins/blocking-shell/tests/smoke_codex.py --codex /path/to/codex --out
 呼び出しで期限を上書きせず、既定21600秒が適用されることも確認する。
 試験の出力ディレクトリは確認後に削除する。
 
+## テンプレート候補の実験
+
+`experiments/template_similarity.py` はsession-historyの取得JSONを入力に、
+直近100回の`run`を最大50件前まで比較するオフラインPoC。
+raw DEFLATEの対称化NCDと、シェルトークン列のSequenceMatcherを比較する。
+履歴内のコマンドは実行せず、MCPサーバーやインストール済みPluginも変更しない。
+
+```sh
+uv run --script experiments/template_similarity.py history.json --out result.json
+```
+
+資源制限付きのblocking-shellから実行する。前半で閾値を選び、後半を評価する。
+評価ラベルは「pytest呼び出しが出力先だけ異なり、実行条件も一致する」という限定した基準。
+完全一致のコマンドは精度評価から除外し、長すぎる入力は切り詰めず除外数を返す。
+一般的な意味の類似性や、別セッションへの汎化精度を測るものではない。
+
+候補が3件以上集まると、異なる`--option=/path`だけを値へ分離できる場合に
+テンプレート案を生成し、元の文字列への完全な復元を検証する。
+これはレビュー用の案であり、シェル構文の安全な生成・実行機能ではない。
+入力トークン比較は`o200k_base`、空白なしJSON、定義と説明を1回分含めた回顧的な試算。
+ツールスキーマ・応答・会話履歴の再入力は含まず、実現済みの節約量とは区別する。
+
+結果JSONは比較に使ったコマンドと実行条件を含むため、公開前の確認が必要。
+全会話の代わりにこの結果をローカルへ保持し、同じ選択上限で入力に指定して再評価できる。
+
 MIT License。詳細は [LICENSE](LICENSE) を参照。
