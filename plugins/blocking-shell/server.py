@@ -58,6 +58,8 @@ def command_overrides(state: SessionState) -> dict[str, str]:
 def set_bashrc(script: str, ctx: Context, ref: str | None = None) -> dict:
     """Register Bash source text for this conversation, or replace it by ref.
 
+    Use for functions, aliases or SDK setup needed by several commands. For
+    literal environment values use set_env; for one-off setup put it in cmd.
     Omit ref to append a script and receive its ID; editing preserves its order.
     Each run/rerun sources scripts in registration order after normal Bash startup,
     before cmd. Nonzero source status stops execution. Survives reconnects and
@@ -98,6 +100,7 @@ def delete_bashrc(ref: str, ctx: Context) -> dict:
 def set_env(values: dict[str, str], ctx: Context) -> dict:
     """Set or replace environment overrides for this conversation's subsequent runs.
 
+    Use for repeated settings such as CC=clang; one-off assignments belong in cmd.
     Values are literal strings. Other variables stay unchanged. Survives MCP
     reconnects and compaction; applies only to blocking-shell, not other tools.
     Names are restored to model context after automatic compaction.
@@ -238,8 +241,8 @@ async def result(ctx: Context, run_ref: str | None = None) -> dict:
 async def run(
     cmd: Annotated[str, Field(
         description="Foreground command, including any per-command environment assignments.")],
-    workdir: Annotated[str, Field(description="Existing absolute working directory; accepts $BLOCKING_SHELL_SCRATCH_DIR or ${BLOCKING_SHELL_SCRATCH_DIR}, optionally followed by /subdir.")],
-    scratch_ref: Annotated[str, Field(description="ID from scratch.create for saved logs and results; its path is exposed as BLOCKING_SHELL_SCRATCH_DIR.")],
+    workdir: Annotated[str, Field(description="Existing absolute working directory; accepts $SCRATCH_DIR or ${SCRATCH_DIR}, optionally followed by /subdir.")],
+    scratch_ref: Annotated[str, Field(description="ID from scratch.create for saved logs and results; its path is exposed as SCRATCH_DIR.")],
     ctx: Context,
     max_output_tokens: Annotated[int, Field(ge=0, strict=True,
         description="Maximum tokens in the returned log tail (default 1000), excluding metadata; full logs are saved.")] = 1000,
@@ -276,7 +279,7 @@ async def run(
             raise ValueError('Registered bashrc scripts require Bash; select Bash or delete the scripts')
     with result_directory(scratch_ref) as out:
         expanded_workdir = workdir
-        for variable in ("$BLOCKING_SHELL_SCRATCH_DIR", "${BLOCKING_SHELL_SCRATCH_DIR}"):
+        for variable in ("$SCRATCH_DIR", "${SCRATCH_DIR}"):
             if workdir == variable or workdir.startswith(variable + "/"):
                 expanded_workdir = str(out.parent) + workdir[len(variable):]
                 break
@@ -317,7 +320,7 @@ async def run(
                 "--property=StandardError=inherit",
                 *("--setenv=" + key for key in environment),
                 *("--setenv=" + key + "=" + value for key, value in overrides.items()),
-                "--setenv=BLOCKING_SHELL_SCRATCH_DIR=" + str(out.parent),
+                "--setenv=SCRATCH_DIR=" + str(out.parent),
                 executable, "-lc" if login else "-c", command,
                 cwd=work, stdin=asyncio.subprocess.DEVNULL,
                 stdout=stream, stderr=stream, env=environment)

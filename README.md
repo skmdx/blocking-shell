@@ -26,8 +26,8 @@ codex plugin add blocking-shell@blocking-shell
 3. `status`・`exit_code`とログ末尾を確認する。不足する場合だけ`log_path`の完全ログや`result_path`の詳細JSONを読む。
 4. 結果が不要になったらScratchの`delete`で保存先を削除する。実行中の保存先は削除されない。
 
-`workdir`には絶対パスのほか、`$BLOCKING_SHELL_SCRATCH_DIR`とその配下を指定できる。
-コマンド内でも`"$BLOCKING_SHELL_SCRATCH_DIR"`で選択した保存先を参照できる。
+`workdir`には絶対パスのほか、`$SCRATCH_DIR`とその配下を指定できる。
+コマンド内でも`"$SCRATCH_DIR"`で選択した保存先を参照できる。
 
 `rerun()`は同じ会話で直前に受け付けたコマンドを、現在の環境設定で再実行する。
 実行条件は引き継ぎ、ログは新規作成する。保存先を変更する場合は
@@ -54,17 +54,30 @@ codex plugin add blocking-shell@blocking-shell
 
 ## 環境設定
 
-共通のalias・関数・環境変数は、Codexのユーザー設定
+設定を使う期間と、値だけかBash処理が必要かで選ぶ。
+
+| 局面 | 選ぶ方法 | 例 |
+| --- | --- | --- |
+| 次の1回だけコンパイラや初期化を変える | `run`の`cmd`に書く | `CC=clang make`、`source ./sdk-env.sh && make` |
+| この会話でビルドとテストに同じ値を渡す | `set_env` | `set_env(values={"CC": "clang"})` |
+| この会話で関数・alias・SDK初期化を繰り返し使う | `set_bashrc` | `set_bashrc(script="source ./sdk-env.sh")` |
+| 別の会話やツールでも常に使う | 共通の`BASH_ENV`ファイル | 普段使う関数や環境変数 |
+
+`set_bashrc`はBash本文を登録する。たとえば`source ./sdk-env.sh`は各コマンドの
+`workdir`を基準に、実行のたびに読み込まれる。作業ディレクトリを変える場合は、
+共通して参照できるパスを指定する。コンパイルなどの本処理は`cmd`に置く。
+値だけの設定は`set_env`で十分で、事前の設定が不要ならそのまま`run`を使う。
+
+常設のalias・関数・環境変数は、Codexのユーザー設定
 `$CODEX_HOME/config.toml`（既定`~/.codex/config.toml`）の
 `[shell_environment_policy.set]`に指定した`BASH_ENV`のファイルへまとめる。
 `run`・`rerun`ごとにこの設定を読み、未指定なら起動元の`BASH_ENV`を継承する。
 プロジェクト設定・profile・CLIの上書きは参照しない。Bashは`login`の値によらずこのファイルを読む。
 
-| 用途 | 操作 |
-| --- | --- |
-| 1回だけの環境変数 | `cmd`に`CC=clang make`のように書く |
-| 会話内で共通の環境変数 | `set_env(values={"CC": "clang"})`で設定し、`list_env()`・`unset_env(names=["CC"])`で確認・解除する |
-| 会話内で共通のBash処理 | `set_bashrc(script="...")`で登録し、返された`ref`で置換・削除する。本文は`get_bashrc(refs=[...])`でまとめて取得する |
+環境変数は`list_env()`で確認し、`unset_env(names=["CC"])`で解除する。
+Bash本文は登録時に返る`ref`を使い、`set_bashrc(ref="...", script="...")`で置換、
+`delete_bashrc(ref="...")`で解除する。IDを忘れた場合は`list_bashrc()`、
+本文の確認には`get_bashrc(refs=[...])`を使う。会話内での用途が終わった設定は解除する。
 
 環境変数の更新応答は変更した名前を返し、全値は`list_env`で確認する。
 Bash本文は対象別に成功・失敗を返す。`next_cursor`があれば同じ`refs`で続きを取得する。

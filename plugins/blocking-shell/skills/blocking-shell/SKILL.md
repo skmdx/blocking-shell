@@ -11,9 +11,9 @@ from Scratch's `create`. Keep commands in the foreground and noninteractive.
 The call waits for completion; normal use needs no subsequent status request.
 
 Prefer paths relative to `workdir`. For work inside the selected Scratch directory,
-use `$BLOCKING_SHELL_SCRATCH_DIR` as `workdir`, optionally with a `/subdir`.
+use `$SCRATCH_DIR` as `workdir`, optionally with a `/subdir`.
 The braced form also works; other variables and shell expressions are not expanded.
-In `cmd`, use `"$BLOCKING_SHELL_SCRATCH_DIR"` to access that directory.
+In `cmd`, use `"$SCRATCH_DIR"` to access that directory.
 The tool supplies this variable on every run, overriding environment settings.
 
 Assess `status` and `exit_code`. `state: finished` means the result is final,
@@ -49,6 +49,21 @@ requests do not replace it. Re-execution repeats side effects and requires the
 same authorization as `run`.
 
 ## Configure commands
+
+Choose by lifetime and whether setup needs shell code:
+
+| Situation | Use |
+| --- | --- |
+| One command needs a different value or setup | Put `CC=clang make` or `source ./sdk-env.sh && make` in `cmd` |
+| Several commands in this conversation need the same literal values | `set_env(values={"CC": "clang"})` |
+| Several commands need functions, aliases or SDK initialization | `set_bashrc(script="source ./sdk-env.sh")` |
+| Settings should apply across conversations and tools | The shared `BASH_ENV` file |
+
+No setup call is needed for ordinary commands. Registered Bash code runs before
+every subsequent command, relative to that command's `workdir`; use a stable path
+when working directories vary. Keep the actual build or test in `cmd`.
+Remove temporary overrides with `unset_env(names=[...])` and registered scripts
+with `delete_bashrc(ref=...)` when their purpose ends.
 
 Keep shared aliases, functions and environment settings in the Bash file selected
 by top-level `shell_environment_policy.set.BASH_ENV` in the user

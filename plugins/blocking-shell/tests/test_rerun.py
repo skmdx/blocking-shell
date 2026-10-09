@@ -30,7 +30,7 @@ async def main():
         scratch = space.create()
         ref = scratch['scratch_ref']
         env = dict(os.environ, SCRATCH_ROOT=directory, CODEX_THREAD_ID='one',
-                   BLOCKING_SHELL_STATE_DIR=str(root/'state'), BLOCKING_SHELL_SCRATCH_DIR='inherited-wrong')
+                   BLOCKING_SHELL_STATE_DIR=str(root/'state'), SCRATCH_DIR='inherited-wrong')
 
         @asynccontextmanager
         async def connect():
@@ -41,7 +41,7 @@ async def main():
                     yield session
 
         arguments = dict(cmd='printf "%s|%s|%s\\n" "$0" "$PWD" "$RERUN_TEST"; echo x >> count; '
-                         'echo x >> "$BLOCKING_SHELL_SCRATCH_DIR/artifact"',
+                         'echo x >> "$SCRATCH_DIR/artifact"',
                          workdir=directory, scratch_ref=ref, shell='/bin/bash', login=False,
                          memory_max_mib=64, timeout_seconds=9, max_output_tokens=100)
         async with connect() as session:
@@ -52,7 +52,7 @@ async def main():
             await call(session, 'rerun', error=True)
             await call(session, 'result', error=True)
             await call(session, 'set_env', {'values': {'RERUN_TEST': 'before',
-                                                     'BLOCKING_SHELL_SCRATCH_DIR': 'override-wrong'}})
+                                                     'SCRATCH_DIR': 'override-wrong'}})
             first = await call(session, 'run', arguments)
             assert first['exit_code'] == 0, first
             assert await call(session, 'result') == first
@@ -97,13 +97,13 @@ async def main():
             assert repeated['output_tail'] == 'failed'
             subdir = Path(scratch['path'])/'sub dir'
             subdir.mkdir()
-            for workdir, expected in [('$BLOCKING_SHELL_SCRATCH_DIR', scratch['path']),
-                                      ('${BLOCKING_SHELL_SCRATCH_DIR}/sub dir', str(subdir))]:
+            for workdir, expected in [('$SCRATCH_DIR', scratch['path']),
+                                      ('${SCRATCH_DIR}/sub dir', str(subdir))]:
                 cwd_args = dict(arguments, cmd='pwd -P', scratch_ref=replacement, workdir=workdir)
                 actual = await call(session, 'run', cwd_args)
                 assert actual['exit_code'] == 0 and actual['output_tail'].strip() == expected, actual
-            for invalid in ('$BLOCKING_SHELL_SCRATCH_DIR/missing',
-                            '$BLOCKING_SHELL_SCRATCH_DIR_SUFFIX', '$HOME', '$(pwd)'):
+            for invalid in ('$SCRATCH_DIR/missing',
+                            '$SCRATCH_DIR_SUFFIX', '$HOME', '$(pwd)'):
                 await call(session, 'run', dict(cwd_args, workdir=invalid), error=True)
             new_scratch = space.create()
             new_subdir = Path(new_scratch['path'])/'sub dir'
