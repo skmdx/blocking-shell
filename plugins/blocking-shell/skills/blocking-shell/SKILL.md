@@ -59,6 +59,15 @@ or already-running commands. Commands otherwise inherit the server's startup
 environment. Put per-command assignments in `cmd`; later changes in another
 shell are not inherited. Login startup files can still change the environment.
 
+Use `set_bashrc(path="/absolute/path/to/bashrc")` to register additional Bash
+settings for this conversation. Each `run`/`rerun` sources the current file after
+normal startup (including `BASH_ENV`) and before `cmd`; source failure stops the
+command. Registration requires a readable absolute file path and runs require Bash.
+Use `shopt -s expand_aliases` in the file for aliases; keep it noninteractive.
+`get_bashrc()` returns the path; `set_bashrc(path=null)` clears registration without
+deleting the file. Like environment overrides, it survives reconnects/compaction
+and affects only subsequent commands in this conversation.
+
 Assess `status` and `exit_code`. Inspect saved log excerpts only when the returned
 tail does not settle the result. After a transport failure, inspect the process
 and saved result before rerunning. `accounting_error` and `cleanup_error` appear

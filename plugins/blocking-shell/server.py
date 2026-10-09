@@ -9,6 +9,8 @@ import json
 import os
 from pathlib import Path
 import pwd
+import shlex
+import shutil
 import time
 import tomllib
 from typing import Annotated
@@ -49,6 +51,33 @@ def command_overrides(state: SessionState) -> dict[str, str]:
         overrides['BASH_ENV'] = bash_env
     overrides.update(state.list())
     return overrides
+
+
+def validate_bashrc(path: str) -> str:
+    file = Path(path)
+    if not file.is_absolute() or not file.is_file() or not os.access(file, os.R_OK):
+        raise ValueError('bashrc must be an existing readable absolute file path')
+    return str(file)
+
+
+@mcp.tool(structured_output=False, annotations=ToolAnnotations(openWorldHint=False))
+def set_bashrc(path: str | None, ctx: Context) -> dict:
+    """Register an additional Bash startup file for this conversation; null clears it.
+
+    Takes an existing readable absolute path, not file contents. Each run/rerun
+    sources the current file after normal startup, before cmd. Requires Bash.
+    Survives reconnects and compaction; other conversations and running jobs are
+    unaffected. Source failure stops the command. Returns the registered path.
+    """
+    if path is not None:
+        path = validate_bashrc(path)
+    return {'path': session_state(ctx).bashrc(path=path, update=True)}
+
+
+@mcp.tool(structured_output=False, annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False))
+def get_bashrc(ctx: Context) -> dict:
+    """Return this conversation's registered bashrc path, or null when unset."""
+    return {'path': session_state(ctx).bashrc()}
 
 
 @mcp.tool(structured_output=False, annotations=ToolAnnotations(openWorldHint=False))
@@ -175,6 +204,14 @@ async def run(
     environment = dict(os.environ)
     state = session_state(ctx)
     overrides = command_overrides(state)
+    bashrc = state.bashrc()
+    command = cmd
+    if bashrc is not None:
+        if (Path(executable).name == 'sh' or
+                Path(shutil.which(executable) or executable).resolve().name != 'bash'):
+            raise ValueError('A session bashrc requires shell Bash; select Bash or clear set_bashrc')
+        bashrc = validate_bashrc(bashrc)
+        command = f'source {shlex.quote(bashrc)} || exit $?\n{cmd}'
     with result_directory(scratch_ref) as out:
         expanded_workdir = workdir
         for variable in ("$BLOCKING_SHELL_SCRATCH_DIR", "${BLOCKING_SHELL_SCRATCH_DIR}"):
@@ -211,7 +248,7 @@ async def run(
                 *("--setenv=" + key for key in environment),
                 *("--setenv=" + key + "=" + value for key, value in overrides.items()),
                 "--setenv=BLOCKING_SHELL_SCRATCH_DIR=" + str(out.parent),
-                executable, "-lc" if login else "-c", cmd,
+                executable, "-lc" if login else "-c", command,
                 cwd=work, stdin=asyncio.subprocess.DEVNULL,
                 stdout=stream, stderr=stream, env=environment)
             try:

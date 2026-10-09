@@ -38,6 +38,21 @@ class SessionState:
     def list(self) -> dict[str, str]:
         return self.update({}, [])
 
+    def bashrc(self, *, path: str | None = None, update: bool = False) -> str | None:
+        with closing(sqlite3.connect(self.path, timeout=10)) as db, db:
+            db.execute('CREATE TABLE IF NOT EXISTS bashrc '
+                       '(session TEXT PRIMARY KEY, path TEXT NOT NULL)')
+            if update:
+                if path is None:
+                    db.execute('DELETE FROM bashrc WHERE session=?', (self.session,))
+                else:
+                    db.execute('INSERT INTO bashrc VALUES (?, ?) '
+                               'ON CONFLICT(session) DO UPDATE SET path=excluded.path',
+                               (self.session, path))
+            row = db.execute('SELECT path FROM bashrc WHERE session=?',
+                             (self.session,)).fetchone()
+            return row[0] if row else None
+
     def command(self, arguments: dict | None = None) -> dict:
         with closing(sqlite3.connect(self.path, timeout=10)) as db, db:
             db.execute('CREATE TABLE IF NOT EXISTS last_command '
