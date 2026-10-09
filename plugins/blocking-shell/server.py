@@ -126,7 +126,7 @@ async def run(
     cmd: Annotated[str, Field(
         description="Foreground command, including any per-command environment assignments.")],
     workdir: Annotated[str, Field(description="Existing absolute working directory.")],
-    scratch_ref: Annotated[str, Field(description="ID from scratch.create for saved logs and results.")],
+    scratch_ref: Annotated[str, Field(description="ID from scratch.create for saved logs and results; its path is exposed as BLOCKING_SHELL_SCRATCH_DIR.")],
     ctx: Context,
     max_output_tokens: Annotated[int, Field(ge=0, strict=True,
         description="Maximum tokens in the returned log tail (default 1000), excluding metadata; full logs are saved.")] = 1000,
@@ -185,6 +185,7 @@ async def run(
                 "--property=StandardError=inherit",
                 *("--setenv=" + key for key in environment),
                 *("--setenv=" + key + "=" + value for key, value in overrides.items()),
+                "--setenv=BLOCKING_SHELL_SCRATCH_DIR=" + str(out.parent),
                 executable, "-lc" if login else "-c", cmd,
                 cwd=work, stdin=asyncio.subprocess.DEVNULL,
                 stdout=stream, stderr=stream, env=environment)

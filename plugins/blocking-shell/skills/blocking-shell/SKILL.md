@@ -8,6 +8,9 @@ Announce the command first; the call waits until completion without a poll handl
 Supply the existing absolute `workdir` and `scratch_ref` from Scratch's `create`.
 Since `workdir` is supplied separately, prefer paths relative to it in `cmd`.
 Use absolute paths only when needed.
+Use `"$BLOCKING_SHELL_SCRATCH_DIR"` in `cmd` to access the directory selected by
+`scratch_ref`, for example `make > "$BLOCKING_SHELL_SCRATCH_DIR/build.log"`.
+It is set for each `run` and `rerun`, overriding inherited and `set_env` values.
 Keep jobs in the foreground and use noninteractive options.
 
 Call `rerun()` directly to repeat this conversation's last accepted command with

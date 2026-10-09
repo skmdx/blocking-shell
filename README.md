@@ -28,6 +28,9 @@ MCPにはターンのcwdが渡されないため、`workdir`は必須。
 環境変数は現在の設定を使う。ログは毎回新規作成し、Scratchの保存先を変更する場合だけ
 `rerun(scratch_ref="...")`を指定する。履歴はMCP再接続・圧縮後も維持する。
 Scratchプラグインの`create`が返す英単語IDを`scratch_ref`へ渡す。
+コマンド内では`"$BLOCKING_SHELL_SCRATCH_DIR"`でそのディレクトリの絶対パスを参照できる。
+`run`・`rerun`ごとに設定し、継承環境や`set_env`の同名設定より優先する。
+例: `make > "$BLOCKING_SHELL_SCRATCH_DIR/build.log"`。
 `timeout_seconds`は省略時も21600秒（6時間）で停止する。
 別の実行期限が必要な場合だけ1〜86400秒で指定する。期限では子孫プロセスも停止する。
 保存結果の`timeout_seconds`で実際に適用した期限を確認できる。
