@@ -8,6 +8,8 @@
         "server.py"
       ],
       "env_vars": [
+        "XDG_STATE_HOME",
+        "BLOCKING_SHELL_STATE_DIR",
         "CODEX_WORK",
         "SCRATCH_ROOT",
         "CODEX_THREAD_ID",

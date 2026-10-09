@@ -15,14 +15,52 @@ from typing import Annotated
 import anyio
 import tiktoken
 from pydantic import Field
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import ToolAnnotations
 from scratch_space import ScratchSpace
 from word_ids import create_directory
+from session_environment import SessionEnvironment
 
 mcp = FastMCP("blocking-shell")
 encoding = tiktoken.get_encoding("o200k_base")
 max_token_bytes = max(map(len, encoding.token_byte_values()))
+
+
+def session_environment(ctx: Context) -> SessionEnvironment:
+    meta = ctx.request_context.meta
+    values = meta.model_dump() if meta else {}
+    return SessionEnvironment(values.get('threadId', os.environ.get('CODEX_THREAD_ID')))
+
+
+@mcp.tool(structured_output=False, annotations=ToolAnnotations(openWorldHint=False))
+def set_env(values: dict[str, str], ctx: Context) -> dict:
+    """Set or replace environment overrides for this conversation's subsequent runs.
+
+    Values are literal strings. Other variables stay unchanged. Survives MCP
+    reconnects and compaction; applies only to blocking-shell, not other tools.
+    Stored values are injected into model context after automatic compaction.
+    Returns all tool-configured overrides. Running commands are unaffected.
+    """
+    return {'variables': session_environment(ctx).update(values, [])}
+
+
+@mcp.tool(structured_output=False, annotations=ToolAnnotations(destructiveHint=True, openWorldHint=False))
+def unset_env(names: list[str], ctx: Context) -> dict:
+    """Remove named overrides from this conversation; absent names are harmless.
+
+    Subsequent runs fall back to inherited values, if any. Does not unset the
+    server's own environment or change running commands. Returns remaining overrides.
+    """
+    return {'variables': session_environment(ctx).update({}, names)}
+
+
+@mcp.tool(structured_output=False, annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False))
+def list_env(ctx: Context) -> dict:
+    """Return this conversation's tool-configured environment names and values.
+
+    Excludes inherited variables and per-command assignments.
+    """
+    return {'variables': session_environment(ctx).list()}
 
 
 @contextmanager
@@ -89,6 +127,7 @@ async def run(
         description="Foreground command, including any per-command environment assignments.")],
     workdir: Annotated[str, Field(description="Existing absolute working directory.")],
     scratch_ref: Annotated[str, Field(description="ID from scratch.create for saved logs and results.")],
+    ctx: Context,
     max_output_tokens: Annotated[int, Field(ge=0, strict=True,
         description="Maximum tokens in the returned log tail (default 1000), excluding metadata; full logs are saved.")] = 1000,
     shell: Annotated[str | None, Field(
@@ -117,6 +156,7 @@ async def run(
         raise ValueError("workdir must be an existing absolute directory")
     executable = shell or pwd.getpwuid(os.getuid()).pw_shell
     environment = dict(os.environ)
+    overrides = session_environment(ctx).list()
     with result_directory(scratch_ref) as out:
         log = out / "output.log"
         log.touch()
@@ -140,6 +180,7 @@ async def run(
                 "--property=StandardOutput=append:" + str(log).replace("%", "%%"),
                 "--property=StandardError=inherit",
                 *("--setenv=" + key for key in environment),
+                *("--setenv=" + key + "=" + value for key, value in overrides.items()),
                 executable, "-lc" if login else "-c", cmd,
                 cwd=work, stdin=asyncio.subprocess.DEVNULL,
                 stdout=stream, stderr=stream, env=environment)

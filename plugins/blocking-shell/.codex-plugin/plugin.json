@@ -1,6 +1,6 @@
 {
   "name": "blocking-shell",
-  "version": "0.2.0+codex.20261008140042",
+  "version": "0.3.0+codex.20261009.2",
   "description": "Run long shell commands through one blocking MCP call without polling.",
   "author": {
     "name": "skmdx"
@@ -15,5 +15,6 @@
     "capabilities": [],
     "defaultPrompt": "Run the build and wait for completion with blocking-shell."
   },
-  "mcpServers": "./.mcp.json"
+  "mcpServers": "./.mcp.json",
+  "hooks": "./hooks/hooks.json"
 }

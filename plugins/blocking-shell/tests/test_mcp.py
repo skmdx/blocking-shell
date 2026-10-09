@@ -32,12 +32,13 @@ async def main():
         space = ScratchSpace(root, session='shell-tests')
         item = space.create()
         ref, logs = item['scratch_ref'], Path(item['path'])
-        env = dict(os.environ, SCRATCH_ROOT=tmp, BLOCKING_SHELL_TEST="inherited $value % value")
+        env = dict(os.environ, SCRATCH_ROOT=tmp, BLOCKING_SHELL_STATE_DIR=str(root / 'data'),
+                   CODEX_THREAD_ID='shell-tests', BLOCKING_SHELL_TEST="inherited $value % value")
         async with stdio_client(StdioServerParameters(command=sys.executable, args=[str(server)], env=env, cwd=tmp)) as (reader, writer):
             async with ClientSession(reader, writer, read_timeout_seconds=timedelta(seconds=20)) as session:
                 await session.initialize()
                 schemas = {tool.name: tool.inputSchema for tool in (await session.list_tools()).tools}
-                assert set(schemas) == {"run"}, schemas
+                assert set(schemas) == {"run", "set_env", "unset_env", "list_env"}, schemas
                 schema = schemas["run"]
                 assert set(schema["required"]) == {"cmd", "workdir", "scratch_ref"}, schema
                 assert schema["properties"]["timeout_seconds"]["default"] == 21600

@@ -26,8 +26,14 @@ Set `timeout_seconds` when a different deadline is needed; expiry stops the
 command and descendants. Do not shorten it from a guessed build duration.
 Normally omit `shell` and `login`. Select `shell` when command syntax requires it;
 set `login: false` when login startup files must not change the environment.
-Commands inherit the MCP server's startup environment. Put per-command environment
-assignments in `cmd`; later changes in another shell are not inherited.
+Use `set_env(values={...})` for environment overrides shared by this conversation's
+subsequent `run` calls; `list_env()` returns them and `unset_env(names=[...])`
+removes overrides, restoring inherited values if present. Values survive MCP
+reconnects and are injected into model context after automatic compaction.
+They apply only to blocking-shell commands, not other tools, other conversations,
+or already-running commands. Commands otherwise inherit the server's startup
+environment. Put per-command assignments in `cmd`; later changes in another
+shell are not inherited. Login startup files can still change the environment.
 
 Assess `status` and `exit_code`. Inspect saved log excerpts only when the returned
 tail does not settle the result. After a transport failure, inspect the process

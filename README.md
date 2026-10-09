@@ -41,8 +41,16 @@ swapは禁止し、メモリ超過時はcgroup全体を停止する。上限を�
 完全なstdout/stderrは結合ログ、詳細な結果は`result_path`のJSONに保存する。
 保存結果には適用した制限、ログ全体のバイト数、末尾の`output_tokens`・`output_token_encoding`も含む。
 計数はtiktokenの`o200k_base`を使い、不正なUTF-8は置換する。利用モデルの課金トークン数ではない。
-環境ファイルの準備は不要。変数は`CC=clang make`のように`cmd`内で指定する。
-転送する変数は`.mcp.json`の`env_vars`で指定し、別シェルでの変更は自動継承しない。
+`set_env(values={"CC": "clang"})`で、この会話の以後の`run`へ渡す環境変数を設定する。
+`list_env()`はツールで設定した名前と値だけを返す。
+`unset_env(names=["CC"])`は登録した上書きを削除し、継承値があればそれに戻す。
+設定は会話IDごとに`$XDG_STATE_HOME/blocking-shell`（既定`~/.local/state/blocking-shell`）へ保存し、
+MCP再接続後も維持する。保存先はホスト環境の`BLOCKING_SHELL_STATE_DIR`で上書きできる。
+他の会話・他のツール・実行中のコマンド・systemdの管理操作には適用しない。
+一回だけの指定は`CC=clang make`のように`cmd`内へ書く。
+転送する基底変数は`.mcp.json`の`env_vars`で指定し、別シェルでの変更は自動継承しない。
+自動コンテキスト圧縮後は、`SessionStart`フックが設定した名前と値をモデルへ注入する。
+導入時に`/hooks`でフックを確認・信頼する。Codex 0.162.0の手動圧縮APIでは発火しない。
 CPU時間は秒、最大メモリとブロックIO量はバイトで、子孫を含むunit cgroupの回収前の値。
 取得不能は`null`となる。統計取得・回収に失敗した場合だけ`accounting_error`・`cleanup_error`を返す。
 サーバーの強制終了やホスト障害からのジョブ復元は行わない。
@@ -55,6 +63,7 @@ CPU時間は秒、最大メモリとブロックIO量はバイトで、子孫を
 
 ```sh
 uv run --script plugins/blocking-shell/tests/test_mcp.py /absolute/scratch
+TMPDIR=/absolute/scratch uv run --script plugins/blocking-shell/tests/test_environment.py
 ```
 
 インストール済みPluginを実Codexで確認する試験（Codex利用枠を使用）:
