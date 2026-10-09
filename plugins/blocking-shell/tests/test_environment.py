@@ -57,7 +57,7 @@ async def main():
         values = {'ENV_TEST': 'literal $HOME %u "quotes" \\ slash\n日本語',
                   'ENV_EMPTY': '', 'XDG_RUNTIME_DIR': '/job-only-runtime'}
         async with connect() as session:
-            assert set(t.name for t in (await session.list_tools()).tools) == {'run', 'set_env', 'unset_env', 'list_env'}
+            assert set(t.name for t in (await session.list_tools()).tools) == {'run', 'rerun', 'set_env', 'unset_env', 'list_env'}
             assert (await call(session, 'set_env', {'values': values}))['variables'] == values
             assert json.loads(await run(session)) == values
             await call(session, 'set_env', {'values': {'ENV_TEST': 'foreign'}}, 'two')

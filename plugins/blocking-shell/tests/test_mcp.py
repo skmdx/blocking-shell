@@ -38,7 +38,7 @@ async def main():
             async with ClientSession(reader, writer, read_timeout_seconds=timedelta(seconds=20)) as session:
                 await session.initialize()
                 schemas = {tool.name: tool.inputSchema for tool in (await session.list_tools()).tools}
-                assert set(schemas) == {"run", "set_env", "unset_env", "list_env"}, schemas
+                assert set(schemas) == {"run", "rerun", "set_env", "unset_env", "list_env"}, schemas
                 schema = schemas["run"]
                 assert set(schema["required"]) == {"cmd", "workdir", "scratch_ref"}, schema
                 assert schema["properties"]["timeout_seconds"]["default"] == 21600

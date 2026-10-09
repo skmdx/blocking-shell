@@ -8,6 +8,15 @@ Announce the command first; the call waits until completion without a poll handl
 Supply the existing absolute `workdir` and `scratch_ref` from Scratch's `create`.
 Keep jobs in the foreground and use noninteractive options.
 
+Call `rerun()` directly to repeat this conversation's last accepted command with
+the same workdir, shell, login setting, limits and output budget. It uses current
+environment overrides and writes fresh logs under the previous Scratch reference;
+pass `scratch_ref` to replace a deleted reference. Saved commands survive MCP
+reconnects and compaction, including failed or cancelled commands. Invalid requests
+do not replace them; concurrent requests are ordered by acceptance, not completion.
+Re-execution repeats side effects and requires the same authorization as `run`.
+Do not automatically retry memory exhaustion or an uncertain transport failure.
+
 If a command already started with `exec_command` runs longer than expected,
 replace repeated `write_stdin` polling with one direct `run` call using
 `cmd: "tail --pid=12345 -f /dev/null"` (GNU tail). Replace `12345` with the

@@ -19,17 +19,17 @@ from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import ToolAnnotations
 from scratch_space import ScratchSpace
 from word_ids import create_directory
-from session_environment import SessionEnvironment
+from session_state import SessionState
 
 mcp = FastMCP("blocking-shell")
 encoding = tiktoken.get_encoding("o200k_base")
 max_token_bytes = max(map(len, encoding.token_byte_values()))
 
 
-def session_environment(ctx: Context) -> SessionEnvironment:
+def session_state(ctx: Context) -> SessionState:
     meta = ctx.request_context.meta
     values = meta.model_dump() if meta else {}
-    return SessionEnvironment(values.get('threadId', os.environ.get('CODEX_THREAD_ID')))
+    return SessionState(values.get('threadId', os.environ.get('CODEX_THREAD_ID')))
 
 
 @mcp.tool(structured_output=False, annotations=ToolAnnotations(openWorldHint=False))
@@ -41,7 +41,7 @@ def set_env(values: dict[str, str], ctx: Context) -> dict:
     Stored values are injected into model context after automatic compaction.
     Returns all tool-configured overrides. Running commands are unaffected.
     """
-    return {'variables': session_environment(ctx).update(values, [])}
+    return {'variables': session_state(ctx).update(values, [])}
 
 
 @mcp.tool(structured_output=False, annotations=ToolAnnotations(destructiveHint=True, openWorldHint=False))
@@ -51,7 +51,7 @@ def unset_env(names: list[str], ctx: Context) -> dict:
     Subsequent runs fall back to inherited values, if any. Does not unset the
     server's own environment or change running commands. Returns remaining overrides.
     """
-    return {'variables': session_environment(ctx).update({}, names)}
+    return {'variables': session_state(ctx).update({}, names)}
 
 
 @mcp.tool(structured_output=False, annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False))
@@ -60,7 +60,7 @@ def list_env(ctx: Context) -> dict:
 
     Excludes inherited variables and per-command assignments.
     """
-    return {'variables': session_environment(ctx).list()}
+    return {'variables': session_state(ctx).list()}
 
 
 @contextmanager
@@ -156,8 +156,12 @@ async def run(
         raise ValueError("workdir must be an existing absolute directory")
     executable = shell or pwd.getpwuid(os.getuid()).pw_shell
     environment = dict(os.environ)
-    overrides = session_environment(ctx).list()
+    state = session_state(ctx)
+    overrides = state.list()
     with result_directory(scratch_ref) as out:
+        state.command(dict(cmd=cmd, workdir=workdir, scratch_ref=scratch_ref,
+                           max_output_tokens=max_output_tokens, shell=executable, login=login,
+                           timeout_seconds=timeout_seconds, memory_max_mib=memory_max_mib))
         log = out / "output.log"
         log.touch()
         unit = out.name + ".service"
@@ -232,6 +236,26 @@ async def run(
                                   log_path=str(log), result_path=str(out / "result.json"))
                     (out / "result.json").write_text(json.dumps(result, indent=2) + "\n")
     return summarize(result)
+
+
+@mcp.tool(structured_output=False, annotations=ToolAnnotations(destructiveHint=True, openWorldHint=True))
+async def rerun(
+    ctx: Context,
+    scratch_ref: Annotated[str | None, Field(
+        description="Replacement scratch.create ID; omit to reuse the previous reference.")] = None,
+) -> dict:
+    """Re-execute this conversation's last accepted command with the same run settings.
+
+    Uses current environment overrides and creates fresh logs. The command survives
+    MCP reconnects and compaction, including failed or cancelled runs. Invalid requests
+    do not replace it. Concurrent runs are ordered by acceptance, not completion.
+    With no previous command, or a deleted scratch reference, fails without executing.
+    Inspect the prior result after transport failures before requesting a rerun.
+    """
+    arguments = session_state(ctx).command()
+    if scratch_ref is not None:
+        arguments['scratch_ref'] = scratch_ref
+    return await run(ctx=ctx, **arguments)
 
 
 if __name__ == "__main__":

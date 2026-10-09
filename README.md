@@ -24,6 +24,9 @@ codex plugin add blocking-shell@blocking-shell
 コマンドの期限超過時に終了処理と結果の返却を行う余裕を設けている。
 `cmd`にコマンド、`workdir`に既存ディレクトリの絶対パスを指定する。
 MCPにはターンのcwdが渡されないため、`workdir`は必須。
+`rerun()`は同じ会話の直前に受け付けたコマンドを、同じ実行条件で再実行する。
+環境変数は現在の設定を使う。ログは毎回新規作成し、Scratchの保存先を変更する場合だけ
+`rerun(scratch_ref="...")`を指定する。履歴はMCP再接続・圧縮後も維持する。
 Scratchプラグインの`create`が返す英単語IDを`scratch_ref`へ渡す。
 `timeout_seconds`は省略時も21600秒（6時間）で停止する。
 別の実行期限が必要な場合だけ1〜86400秒で指定する。期限では子孫プロセスも停止する。
@@ -64,6 +67,7 @@ CPU時間は秒、最大メモリとブロックIO量はバイトで、子孫を
 ```sh
 uv run --script plugins/blocking-shell/tests/test_mcp.py /absolute/scratch
 TMPDIR=/absolute/scratch uv run --script plugins/blocking-shell/tests/test_environment.py
+TMPDIR=/absolute/scratch uv run --script plugins/blocking-shell/tests/test_rerun.py
 ```
 
 インストール済みPluginを実Codexで確認する試験（Codex利用枠を使用）:
