@@ -23,6 +23,9 @@ codex plugin add blocking-shell@blocking-shell
 ツールの説明を参照。ホスト側のツール期限は24時間より120秒長く設定し、
 コマンドの期限超過時に終了処理と結果の返却を行う余裕を設けている。
 `cmd`にコマンド、`workdir`に既存ディレクトリの絶対パスを指定する。
+`workdir`は`$BLOCKING_SHELL_SCRATCH_DIR`または`${BLOCKING_SHELL_SCRATCH_DIR}`でも指定でき、
+末尾に`/subdir`を付けられる。毎回その実行の`scratch_ref`から解決するため、
+`rerun(scratch_ref="...")`でも新しい保存先に追従する。他の変数やシェル式は展開しない。
 MCPにはターンのcwdが渡されないため、`workdir`は必須。
 `rerun()`は同じ会話の直前に受け付けたコマンドを、同じ実行条件で再実行する。
 環境変数は現在の設定を使う。ログは毎回新規作成し、Scratchの保存先を変更する場合だけ

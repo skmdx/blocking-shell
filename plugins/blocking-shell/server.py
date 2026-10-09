@@ -125,7 +125,7 @@ def summarize(result: dict) -> dict:
 async def run(
     cmd: Annotated[str, Field(
         description="Foreground command, including any per-command environment assignments.")],
-    workdir: Annotated[str, Field(description="Existing absolute working directory.")],
+    workdir: Annotated[str, Field(description="Existing absolute working directory; accepts $BLOCKING_SHELL_SCRATCH_DIR or ${BLOCKING_SHELL_SCRATCH_DIR}, optionally followed by /subdir.")],
     scratch_ref: Annotated[str, Field(description="ID from scratch.create for saved logs and results; its path is exposed as BLOCKING_SHELL_SCRATCH_DIR.")],
     ctx: Context,
     max_output_tokens: Annotated[int, Field(ge=0, strict=True,
@@ -151,14 +151,19 @@ async def run(
     Timeout, cancellation and memory exhaustion stop the command group.
     Use scratch.delete after the saved results are no longer needed.
     """
-    work = Path(workdir)
-    if not work.is_absolute() or not work.is_dir():
-        raise ValueError("workdir must be an existing absolute directory")
     executable = shell or pwd.getpwuid(os.getuid()).pw_shell
     environment = dict(os.environ)
     state = session_state(ctx)
     overrides = state.list()
     with result_directory(scratch_ref) as out:
+        expanded_workdir = workdir
+        for variable in ("$BLOCKING_SHELL_SCRATCH_DIR", "${BLOCKING_SHELL_SCRATCH_DIR}"):
+            if workdir == variable or workdir.startswith(variable + "/"):
+                expanded_workdir = str(out.parent) + workdir[len(variable):]
+                break
+        work = Path(expanded_workdir)
+        if not work.is_absolute() or not work.is_dir():
+            raise ValueError("workdir must be an existing absolute directory after scratch expansion")
         state.command(dict(cmd=cmd, workdir=workdir, scratch_ref=scratch_ref,
                            max_output_tokens=max_output_tokens, shell=executable, login=login,
                            timeout_seconds=timeout_seconds, memory_max_mib=memory_max_mib))

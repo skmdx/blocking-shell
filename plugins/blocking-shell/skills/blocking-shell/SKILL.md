@@ -5,7 +5,11 @@ description: Run long builds, test suites, and other foreground shell commands t
 
 Call `run` directly, outside code-mode cells, for authorized long-running commands.
 Announce the command first; the call waits until completion without a poll handle.
-Supply the existing absolute `workdir` and `scratch_ref` from Scratch's `create`.
+Supply `scratch_ref` from Scratch's `create` and an existing directory as `workdir`.
+`workdir` accepts an absolute path or `$BLOCKING_SHELL_SCRATCH_DIR`
+(also `${BLOCKING_SHELL_SCRATCH_DIR}`), optionally followed by `/subdir`.
+This prefix resolves from the selected `scratch_ref` on every run, including
+`rerun(scratch_ref=...)`; other variables and shell expressions are not expanded.
 Since `workdir` is supplied separately, prefer paths relative to it in `cmd`.
 Use absolute paths only when needed.
 Use `"$BLOCKING_SHELL_SCRATCH_DIR"` in `cmd` to access the directory selected by

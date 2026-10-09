@@ -90,7 +90,22 @@ async def main():
             repeated = await call(session, 'rerun')
             assert repeated['exit_code'] == 7 and repeated['status'] == 'failed', repeated
             assert repeated['output_tail'] == 'failed'
-            assert space.delete()['deleted'] == [replacement]
+            subdir = Path(scratch['path'])/'sub dir'
+            subdir.mkdir()
+            for workdir, expected in [('$BLOCKING_SHELL_SCRATCH_DIR', scratch['path']),
+                                      ('${BLOCKING_SHELL_SCRATCH_DIR}/sub dir', str(subdir))]:
+                cwd_args = dict(arguments, cmd='pwd -P', scratch_ref=replacement, workdir=workdir)
+                actual = await call(session, 'run', cwd_args)
+                assert actual['exit_code'] == 0 and actual['output_tail'].strip() == expected, actual
+            for invalid in ('$BLOCKING_SHELL_SCRATCH_DIR/missing',
+                            '$BLOCKING_SHELL_SCRATCH_DIR_SUFFIX', '$HOME', '$(pwd)'):
+                await call(session, 'run', dict(cwd_args, workdir=invalid), error=True)
+            new_scratch = space.create()
+            new_subdir = Path(new_scratch['path'])/'sub dir'
+            new_subdir.mkdir()
+            actual = await call(session, 'rerun', {'scratch_ref': new_scratch['scratch_ref']})
+            assert actual['exit_code'] == 0 and actual['output_tail'].strip() == str(new_subdir), actual
+            assert set(space.delete()['deleted']) == {replacement, new_scratch['scratch_ref']}
     print('PASS: rerun, restart, isolation, settings, current environment, invalid requests, scratch replacement, failure')
 
 
