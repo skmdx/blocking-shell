@@ -134,8 +134,8 @@ async def run(
         description="Shell executable; omit for the user's default shell. "
                     "Specify when cmd requires a particular shell syntax.")] = None,
     login: Annotated[bool, Field(
-        description="Use -lc (login startup files). Set false for -c when startup "
-                    "files must not alter the command environment.")] = True,
+        description="Use -lc (login startup files). Set false for -c to skip login "
+                    "startup files. Bash still reads BASH_ENV in either mode.")] = True,
     timeout_seconds: Annotated[int, Field(ge=1, le=86400, strict=True,
         description="Execution deadline in seconds, default six hours. Set when a "
                     "different deadline is needed; expiry stops the command and descendants.")] = 21600,

@@ -43,7 +43,9 @@ The execution deadline is six hours by default, including when omitted.
 Set `timeout_seconds` when a different deadline is needed; expiry stops the
 command and descendants. Do not shorten it from a guessed build duration.
 Normally omit `shell` and `login`. Select `shell` when command syntax requires it;
-set `login: false` when login startup files must not change the environment.
+set `login: false` to skip login startup files. Bash reads `BASH_ENV` in either
+mode. The plugin forwards inherited `BASH_ENV`; use `set_env` with an absolute
+file path to override it for this conversation, including subsequent `rerun` calls.
 Use `set_env(values={...})` for environment overrides shared by this conversation's
 subsequent `run` calls; `list_env()` returns them and `unset_env(names=[...])`
 removes overrides, restoring inherited values if present. Values survive MCP

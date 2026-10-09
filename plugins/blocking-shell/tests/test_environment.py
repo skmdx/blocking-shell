@@ -33,10 +33,17 @@ async def main():
     plugin = args.plugin.resolve()
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
+        bash_env = root/'bash env'
+        bash_env.write_text("env_probe() { printf 'inherited\\n'; }\n")
+        override_env = root/'override env'
+        override_env.write_text("env_probe() { printf 'override\\n'; }\n")
+        config = json.loads((plugin/'.mcp.json').read_text())['mcpServers']['blocking-shell']
+        assert 'BASH_ENV' in config['env_vars']
         space = ScratchSpace(root, 'one')
         ref = space.create()['scratch_ref']
         env = dict(os.environ, BLOCKING_SHELL_STATE_DIR=str(root/'data'), PLUGIN_ROOT=str(plugin),
-                   SCRATCH_ROOT=directory, CODEX_THREAD_ID='fallback', ENV_TEST='inherited')
+                   SCRATCH_ROOT=directory, CODEX_THREAD_ID='fallback', ENV_TEST='inherited',
+                   BASH_ENV=str(bash_env))
 
         @asynccontextmanager
         async def connect():
@@ -58,6 +65,17 @@ async def main():
                   'ENV_EMPTY': '', 'XDG_RUNTIME_DIR': '/job-only-runtime'}
         async with connect() as session:
             assert set(t.name for t in (await session.list_tools()).tools) == {'run', 'rerun', 'set_env', 'unset_env', 'list_env'}
+            for login in (False, True):
+                request = dict(cmd='env_probe', workdir=directory, scratch_ref=ref,
+                               shell='/bin/bash', login=login, memory_max_mib=64)
+                inherited = await call(session, 'run', request)
+                assert inherited['exit_code'] == 0 and inherited['output_tail'] == 'inherited\n', inherited
+                await call(session, 'set_env', {'values': {'BASH_ENV': str(override_env)}})
+                overridden = await call(session, 'rerun')
+                assert overridden['exit_code'] == 0 and overridden['output_tail'] == 'override\n', overridden
+                await call(session, 'unset_env', {'names': ['BASH_ENV']})
+                restored = await call(session, 'rerun')
+                assert restored['exit_code'] == 0 and restored['output_tail'] == 'inherited\n', restored
             assert (await call(session, 'set_env', {'values': values}))['variables'] == values
             assert json.loads(await run(session)) == values
             await call(session, 'set_env', {'values': {'ENV_TEST': 'foreign'}}, 'two')
@@ -91,7 +109,7 @@ async def main():
             assert actual['ENV_TEST'] == 'inherited' and actual['ENV_EMPTY'] is None, actual
             assert (await call(session, 'list_env', owner='two'))['variables'] == {'ENV_TEST': 'foreign'}
         assert space.delete()['deleted'] == [ref]
-    print('PASS: real commands, literal values, session isolation, atomic updates, deletion, restart, hook')
+    print('PASS: BASH_ENV inheritance/override/rerun in both login modes, real commands, literal values, session isolation, atomic updates, deletion, restart, hook')
 
 
 if __name__ == '__main__':

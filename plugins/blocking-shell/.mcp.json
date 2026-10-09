@@ -8,6 +8,7 @@
         "server.py"
       ],
       "env_vars": [
+        "BASH_ENV",
         "XDG_STATE_HOME",
         "BLOCKING_SHELL_STATE_DIR",
         "CODEX_WORK",
