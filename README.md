@@ -8,7 +8,7 @@ PTY・対話入力・ポーリング用ハンドルは提供しない。
 
 Linux、systemd 254以上の稼働中user manager、Bash、uv、Python 3.11以上、
 pluginコマンドに対応したCodexが必要。呼び出し側からuser busへ接続できること。
-MCP SDKとtiktokenはuvが導入し、初回起動時にtiktokenの辞書をダウンロードする。
+MCP SDK、tiktoken、構文解析用のtree-sitterはuvが導入し、初回起動時にtiktokenの辞書をダウンロードする。
 実行結果の保存にはScratchプラグインも必要。
 
 ```sh
@@ -37,6 +37,17 @@ codex plugin add blocking-shell@blocking-shell
 `state=finished`なら通常実行と同じ要約を返す。それ以外は`running`・`finishing`・
 `unknown`（結果未確定）・`expired`（保存先削除済み）を区別し、成功を推測しない。
 この対応記録は更新後の実行から作成される。過去のログを自動探索・登録はしない。
+
+同じ会話・作業ディレクトリ・シェルで、類似する長いコマンドや共通手順が3回現れると、
+結果の`suggestion`でスクリプト化または既存ツールへの統合を短く推奨する。
+通常はこのフィールドを省略する。候補と通知済み状態は再接続後も維持し、
+会話ごとに最近の64候補を保持する。保持中の同じ候補には繰り返し通知しない。
+`result()`は保存された推奨も含めて元の結果を返す。
+
+対象はBash・shで受け付けた400文字以上・UTF-8で32 KiB以下のコマンド。
+シェル本文・Python本文を解析し、全体と連続する共通部分を比較する。
+構文未対応や解析量の上限を超えるものは候補にしない。これは共通化候補の通知であり、
+意味の等価性や安全な書換えを保証せず、コマンドの書換え・自動実行は行わない。
 
 | 設定 | 既定値・動作 |
 | --- | --- |
@@ -104,6 +115,8 @@ uv run --script plugins/blocking-shell/tests/test_mcp.py /absolute/scratch
 TMPDIR=/absolute/scratch uv run --script plugins/blocking-shell/tests/test_environment.py
 TMPDIR=/absolute/scratch uv run --script plugins/blocking-shell/tests/test_rerun.py
 TMPDIR=/absolute/scratch uv run --script plugins/blocking-shell/tests/test_recovery.py
+TMPDIR=/absolute/scratch uv run --script plugins/blocking-shell/tests/test_patterns.py
+TMPDIR=/absolute/scratch uv run --script plugins/blocking-shell/tests/test_suggestions.py
 ```
 
 インストール済みPluginを実Codexで確認する試験は、Codex利用枠を使用する。

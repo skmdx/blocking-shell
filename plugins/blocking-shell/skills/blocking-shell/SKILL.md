@@ -30,6 +30,10 @@ memory exhaustion or bypass its limit.
 After using the results, call Scratch's `delete`. Active leases prevent deletion;
 retry skipped or failed cleanup after the work has ended.
 
+An optional `suggestion` flags repeated long commands or shared steps worth
+moving into a script or existing tool. It is advisory; it does not rewrite or
+execute anything. Absent means no new suggestion, not proof of no repetition.
+
 ## Recover a result or repeat a command
 
 After a lost response or reconnect, call `result()` before considering a rerun.

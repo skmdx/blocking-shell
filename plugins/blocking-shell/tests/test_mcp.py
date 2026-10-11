@@ -1,6 +1,6 @@
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["mcp>=1.12,<2", "tiktoken>=0.12,<1"]
+# dependencies = ["mcp>=1.12,<2", "tiktoken>=0.12,<1", "tree-sitter>=0.25,<0.26", "tree-sitter-bash>=0.25,<0.26"]
 # ///
 """Exercise the actual stdio server and real shell processes."""
 import asyncio

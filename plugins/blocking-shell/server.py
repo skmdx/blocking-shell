@@ -1,6 +1,6 @@
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["mcp>=1.12,<2", "tiktoken>=0.12,<1"]
+# dependencies = ["mcp>=1.12,<2", "tiktoken>=0.12,<1", "tree-sitter>=0.25,<0.26", "tree-sitter-bash>=0.25,<0.26"]
 # ///
 """Run foreground shell commands in one blocking MCP request."""
 import asyncio
@@ -186,6 +186,8 @@ def summarize(result: dict) -> dict:
     for key in ("accounting_error", "cleanup_error"):
         if result[key] is not None:
             summary[key] = result[key]
+    if result.get('suggestion'):
+        summary['suggestion'] = result['suggestion']
     if result["status"] != "completed" or result["exit_code"] != 0 or any(
             result[key] is not None for key in ("accounting_error", "cleanup_error")):
         summary.update({key: result[key] for key in ("unit", "unit_result", "systemd_log_path")})
@@ -303,7 +305,8 @@ async def run(
         manager_log = out / "systemd.log"
         started = time.monotonic()
         status = "completed"
-        result: dict = {}
+        suggestion = state.suggestion(cmd, str(work), executable)
+        result: dict = {'suggestion': suggestion} if suggestion else {}
         with manager_log.open("wb") as stream:
             proc = await asyncio.create_subprocess_exec(
                 "systemd-run", "--user", "--service-type=oneshot", "--remain-after-exit",
