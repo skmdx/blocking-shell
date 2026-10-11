@@ -8,6 +8,7 @@ import asyncio
 from contextlib import asynccontextmanager
 import json
 import os
+import sqlite3
 from pathlib import Path
 import sys
 import tempfile
@@ -47,6 +48,7 @@ async def main():
         async with connect() as session:
             schemas = {t.name: t for t in (await session.list_tools()).tools}
             assert not schemas['rerun'].inputSchema.get('required')
+            assert 'run_ref' in schemas['rerun'].inputSchema['properties']
             assert schemas['rerun'].annotations is not None
             assert schemas['rerun'].annotations.destructiveHint
             await call(session, 'rerun', error=True)
@@ -64,11 +66,12 @@ async def main():
             await call(session, 'rerun', owner='two', error=True)
             await call(session, 'run', dict(arguments, cmd='printf foreign'), owner='two')
             await call(session, 'set_env', {'values': {'RERUN_TEST': 'after'}})
+            await call(session, 'run', dict(arguments, cmd='printf newer'))
 
         # New process, same conversation, updated environment, original settings.
         async with connect() as session:
-            assert await call(session, 'result') == first
-            repeated = await call(session, 'rerun')
+            assert await call(session, 'result', {'run_ref': first['run_ref']}) == first
+            repeated = await call(session, 'rerun', {'run_ref': first['run_ref']})
             assert repeated['exit_code'] == 0, repeated
             assert repeated['output_tail'] == f'/bin/bash|{directory}|after\n', repeated
             assert repeated['result_path'] != first['result_path']
@@ -79,14 +82,26 @@ async def main():
             assert result['memory_swap_max_bytes'] == 0
             assert result['accounting_error'] is None and result['cleanup_error'] is None
             assert (await call(session, 'rerun', owner='two'))['output_tail'] == 'foreign'
+            await call(session, 'rerun', {'run_ref': first['run_ref']}, owner='two', error=True)
+            await call(session, 'rerun', {'run_ref': 'missing'}, error=True)
+            # Pre-upgrade records remain readable, but cannot select saved settings.
+            with sqlite3.connect(root/'state'/'environment.sqlite3') as db:
+                db.execute('INSERT INTO executions (session, run_ref, record) VALUES (?, ?, ?)',
+                           ('one', 'legacy', json.dumps(dict(run_ref='legacy', scratch_ref=ref,
+                                                            unit='unused'))))
+            await call(session, 'rerun', {'run_ref': 'legacy'}, error=True)
             assert space.delete()['deleted'] == [ref]
-            assert await call(session, 'result') == dict(run_ref=repeated['run_ref'], state='expired')
+            assert await call(session, 'result', {'run_ref': repeated['run_ref']}) == dict(
+                run_ref=repeated['run_ref'], state='expired')
             await call(session, 'rerun', error=True)
+            await call(session, 'rerun', {'run_ref': first['run_ref']}, error=True)
             assert (root/'count').read_text() == 'x\nx\n'
             scratch = space.create()
             replacement = scratch['scratch_ref']
-            assert (await call(session, 'rerun', {'scratch_ref': replacement}))['exit_code'] == 0
-            assert (await call(session, 'rerun'))['exit_code'] == 0
+            selected = await call(session, 'rerun', {'run_ref': first['run_ref'],
+                                                    'scratch_ref': replacement})
+            assert selected['exit_code'] == 0
+            assert (await call(session, 'rerun', {'run_ref': selected['run_ref']}))['exit_code'] == 0
             assert (root/'count').read_text() == 'x\nx\nx\nx\n'
             assert (Path(scratch['path'])/'artifact').read_text() == 'x\nx\n'
             failed = dict(arguments, cmd='printf failed; exit 7', scratch_ref=replacement,

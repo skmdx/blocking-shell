@@ -384,16 +384,25 @@ async def rerun(
     ctx: Context,
     scratch_ref: Annotated[str | None, Field(
         description="Replacement scratch.create ID; omit to reuse the previous reference.")] = None,
+    run_ref: Annotated[str | None, Field(
+        description="Execution ID from this conversation; omit for the last accepted command.")] = None,
 ) -> dict:
-    """Re-execute this conversation's last accepted command with the same run settings.
+    """Re-execute a command from this conversation with its saved run settings.
 
     Uses current environment overrides and creates fresh logs. The command survives
     MCP reconnects and compaction, including failed or cancelled runs. Invalid requests
     do not replace it. Concurrent runs are ordered by acceptance, not completion.
     With no previous command, or a deleted scratch reference, fails without executing.
+    IDs recorded before per-execution settings were saved cannot be rerun by ID.
     Call result() after transport failures before requesting a rerun.
     """
-    arguments = session_state(ctx).command()
+    state = session_state(ctx)
+    if run_ref is None:
+        arguments = state.command()
+    else:
+        arguments = state.execution(run_ref).get('arguments')
+        if arguments is None:
+            raise ValueError('This execution has no saved run settings; cannot rerun by ID')
     if scratch_ref is not None:
         arguments['scratch_ref'] = scratch_ref
     return await run(ctx=ctx, **arguments)

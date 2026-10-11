@@ -141,7 +141,8 @@ class SessionState:
                                '(position INTEGER PRIMARY KEY AUTOINCREMENT, session TEXT NOT NULL, '
                                'run_ref TEXT UNIQUE NOT NULL, record TEXT NOT NULL)')
                     db.execute('INSERT INTO executions (session, run_ref, record) VALUES (?, ?, ?)',
-                               (self.session, execution['run_ref'], json.dumps(execution)))
+                               (self.session, execution['run_ref'],
+                                json.dumps(dict(execution, arguments=arguments))))
             row = db.execute('SELECT arguments FROM last_command WHERE session=?',
                              (self.session,)).fetchone()
             if row is None:

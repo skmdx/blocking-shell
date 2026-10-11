@@ -47,7 +47,9 @@ do not establish success. No command is restarted and no job recovery occurs.
 Use this for exceptional recovery, not periodic polling.
 
 `rerun()` repeats the last accepted command with its saved execution conditions,
-current environment settings and fresh logs. Pass `scratch_ref` to replace a
+current environment settings and fresh logs. Pass `run_ref` to select an earlier
+execution from this conversation; older records without saved settings fail.
+Pass `scratch_ref` to replace a
 deleted storage reference. History survives reconnects and compaction; invalid
 requests do not replace it. Re-execution repeats side effects and requires the
 same authorization as `run`.
