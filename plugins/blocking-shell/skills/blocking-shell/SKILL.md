@@ -44,6 +44,11 @@ runs, acceptance order differs from completion order; inspect the returned
 A finished result has the same summary as `run`. Otherwise `state` distinguishes
 `running`, `finishing`, `unknown` and `expired`. Missing units or saved results
 do not establish success. No command is restarted and no job recovery occurs.
+While available, elapsed time, CPU, peak memory, IO and log fields use the same
+names as `run`; they are snapshots, not final results. `unit` and `pid` identify
+the systemd unit and its execution process, including in finished summaries.
+The PID is historical after exit; unavailable values are null. Status and exit
+code are returned only with a saved final result.
 Use this for exceptional recovery, not periodic polling.
 
 `rerun()` repeats the last accepted command with its saved execution conditions,

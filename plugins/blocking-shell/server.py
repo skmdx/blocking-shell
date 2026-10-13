@@ -183,6 +183,7 @@ def summarize(result: dict) -> dict:
         "status", "exit_code", "elapsed_seconds", "cpu_seconds", "memory_peak_bytes",
         "io_read_bytes", "io_write_bytes", "output_tail", "output_truncated",
         "log_path", "result_path")}
+    summary.update(unit=result['unit'], pid=result.get('pid'))
     for key in ("accounting_error", "cleanup_error"):
         if result[key] is not None:
             summary[key] = result[key]
@@ -194,13 +195,24 @@ def summarize(result: dict) -> dict:
     return summary
 
 
+def execution_metrics(properties: dict[str, str]) -> dict:
+    cpu_ns = counter(properties, 'CPUUsageNSec')
+    return dict(pid=counter(properties, 'ExecMainPID') or None,
+                cpu_seconds=cpu_ns / 1e9 if cpu_ns is not None else None,
+                memory_peak_bytes=counter(properties, 'MemoryPeak'),
+                io_read_bytes=counter(properties, 'IOReadBytes'),
+                io_write_bytes=counter(properties, 'IOWriteBytes'))
+
+
 @mcp.tool(structured_output=False, annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False))
 async def result(ctx: Context, run_ref: str | None = None) -> dict:
     """Recover an execution result after a lost response or reconnection.
 
     Omit run_ref for this conversation's last accepted execution (not last completed).
     Finished results match run/rerun summaries. Otherwise state is running, finishing,
-    unknown, or expired; no exit code is inferred. This never reruns a command.
+    unknown, or expired; available metrics and logs use run's field names.
+    Unit and execution PID identify the command; no exit code is inferred.
+    This never reruns a command.
     """
     record = session_state(ctx).execution(run_ref)
     reference = record['run_ref']
@@ -214,7 +226,8 @@ async def result(ctx: Context, run_ref: str | None = None) -> dict:
                 if saved.exists():
                     return summarize(json.loads(saved.read_text()))
                 code, output = await control(dict(os.environ), 'show', record['unit'],
-                                             '--property=LoadState,ActiveState,SubState')
+                    '--property=LoadState,ActiveState,SubState,ExecMainPID,CPUUsageNSec,'
+                    'MemoryPeak,IOReadBytes,IOWriteBytes,ExecMainStartTimestampMonotonic')
                 finalizing = False
                 with (out / 'active.lock').open('rb') as owner:
                     try:
@@ -227,13 +240,27 @@ async def result(ctx: Context, run_ref: str | None = None) -> dict:
             except (OSError, json.JSONDecodeError) as error:
                 return dict(run_ref=reference, state='unknown', reason=str(error))
             properties = dict(line.split('=', 1) for line in output.splitlines() if '=' in line)
+            snapshot: dict = dict(run_ref=reference, unit=record['unit'],
+                            log_path=str(out / 'output.log'), result_path=str(saved),
+                            **execution_metrics(properties if code == 0 else {}))
+            start_us = counter(properties, 'ExecMainStartTimestampMonotonic') if code == 0 else None
+            snapshot['elapsed_seconds'] = (
+                round(time.monotonic() - start_us / 1e6, 3) if start_us else None)
+            try:
+                tail, _, truncated = output_tail(out / 'output.log',
+                    record.get('arguments', {}).get('max_output_tokens', 1000))
+                snapshot.update(output_tail=tail, output_truncated=truncated)
+            except OSError as error:
+                return dict(snapshot, state='unknown', reason=str(error))
+            if code:
+                snapshot['accounting_error'] = output.strip()
             if code == 0 and properties.get('LoadState') == 'loaded':
                 if properties.get('SubState') in ('start', 'running'):
-                    return dict(run_ref=reference, state='running')
+                    return dict(snapshot, state='running')
                 if finalizing and (properties.get('ActiveState') == 'deactivating' or
                                    properties.get('SubState') == 'exited'):
-                    return dict(run_ref=reference, state='finishing')
-            return dict(run_ref=reference, state='unknown',
+                    return dict(snapshot, state='finishing')
+            return dict(snapshot, state='unknown',
                         reason='No saved result and no confirmed active execution')
     except (ValueError, FileNotFoundError):
         return dict(run_ref=reference, state='expired')
@@ -337,7 +364,7 @@ async def run(
             finally:
                 with anyio.CancelScope(shield=True):
                     code, accounting = await control(environment, "show", unit, "--property=" + ",".join((
-                        "Result", "ExecMainCode", "ExecMainStatus", "CPUUsageNSec",
+                        "Result", "ExecMainCode", "ExecMainStatus", "ExecMainPID", "CPUUsageNSec",
                         "MemoryPeak", "MemoryMax", "MemorySwapMax",
                         "IOReadBytes", "IOWriteBytes", "ControlGroup")))
                     properties = dict(line.split("=", 1) for line in accounting.splitlines()
@@ -352,17 +379,13 @@ async def run(
                         exit_code = -exit_code
                     if status == "cancelled" and properties.get("ExecMainCode") == "0":
                         exit_code = None
-                    cpu_ns = counter(properties, "CPUUsageNSec")
                     size = log.stat().st_size
                     tail, token_count, truncated = output_tail(log, max_output_tokens)
                     result.update(run_ref=run_ref, state='finished', status=status, exit_code=exit_code,
                                   timeout_seconds=timeout_seconds,
-                                  cpu_seconds=cpu_ns / 1e9 if cpu_ns is not None else None,
-                                  memory_peak_bytes=counter(properties, "MemoryPeak"),
+                                  **execution_metrics(properties),
                                   memory_max_bytes=counter(properties, "MemoryMax"),
                                   memory_swap_max_bytes=counter(properties, "MemorySwapMax"),
-                                  io_read_bytes=counter(properties, "IOReadBytes"),
-                                  io_write_bytes=counter(properties, "IOWriteBytes"),
                                   unit=unit, unit_result=properties.get("Result"),
                                   control_group=properties.get("ControlGroup"),
                                   accounting_error=accounting.strip() if code else None,

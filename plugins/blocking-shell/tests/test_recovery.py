@@ -90,15 +90,24 @@ async def main():
             assert recovered['state'] == 'finished' and recovered['exit_code'] == 0, recovered
             assert recovered['output_tail'] == 'complete\n'
             assert (root/'count').read_text() == 'once\n'
-            first = asyncio.create_task(run(session, 'touch first; while [ ! -f release ]; do sleep .05; done'))
+            first = asyncio.create_task(run(session, 'echo $$ > first; echo active; while [ ! -f release ]; do sleep .05; done'))
             await ready('first')
             active = await call(session, 'result')
             assert active['state'] == 'running', active
+            assert active['pid'] == int((root/'first').read_text()), active
+            assert active['unit'] == 'blocking-shell-' + active['run_ref'] + '.service'
+            assert active['output_tail'] == 'active\n' and not active['output_truncated'], active
+            assert active['elapsed_seconds'] >= 0 and active['cpu_seconds'] >= 0, active
+            assert {'memory_peak_bytes', 'io_read_bytes', 'io_write_bytes'} <= active.keys()
+            assert Path(active['log_path']).is_file() and not Path(active['result_path']).exists()
+            assert 'exit_code' not in active and 'status' not in active
             assert space.delete()['skipped_active'] == [scratch['scratch_ref']]
             second = await run(session, 'echo second')
             assert await call(session, 'result') == second
             (root/'release').touch()
             ended = await first
+            assert ended['pid'] == active['pid'] and ended['unit'] == active['unit'], ended
+            assert active.keys() <= ended.keys(), ended
             assert await call(session, 'result', {'run_ref': active['run_ref']}) == ended
             assert await call(session, 'result') == second
             await call(session, 'result', {'run_ref': active['run_ref']}, owner='two', error=True)
@@ -120,7 +129,8 @@ async def main():
                     raise AssertionError('server death unexpectedly returned a result')
             async with connect() as session:
                 active = await call(session, 'result')
-                assert active == crashed and active['state'] == 'running', active
+                assert active['state'] == 'running', active
+                assert all(active[key] == crashed[key] for key in ('run_ref', 'unit', 'pid')), active
                 # The job finishes, but the dead server cannot save its result.
                 (root/'crash-release').touch()
                 async with asyncio.timeout(10):

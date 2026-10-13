@@ -68,7 +68,8 @@ async def main():
                     assert "timeout_seconds" not in summary and "output_token_encoding" not in summary
                     assert "accounting_error" not in summary and "cleanup_error" not in summary
                     if result["status"] == "completed" and result["exit_code"] == 0:
-                        assert "unit" not in summary and "systemd_log_path" not in summary
+                        assert summary['unit'] == result['unit'] and summary['pid'] > 0
+                        assert "systemd_log_path" not in summary
                     else:
                         assert summary["unit_result"] == result["unit_result"]
                         assert summary["systemd_log_path"] == result["systemd_log_path"]
