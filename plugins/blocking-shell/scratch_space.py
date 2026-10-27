@@ -49,7 +49,11 @@ class ScratchSpace:
             raise ValueError('invalid scratch directory record')
         path = self.root / name
         info = path.lstat()
-        if not stat.S_ISDIR(info.st_mode) or (info.st_dev, info.st_ino) != tuple(record['identity']):
+        # Device numbers can change across boots (including Btrfs subvolumes).
+        # The inode belongs to the configured root's filesystem, whose current
+        # device number also excludes mounts replacing a managed directory.
+        if not stat.S_ISDIR(info.st_mode) or (info.st_dev, info.st_ino) != (
+                self.root.stat().st_dev, record['identity'][1]):
             raise ValueError('scratch directory was replaced; refusing access')
         return path
 
