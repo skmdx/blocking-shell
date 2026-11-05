@@ -285,7 +285,7 @@ async def run(
         description="Execution deadline in seconds, default six hours. Set when a "
                     "different deadline is needed; expiry stops the command and descendants.")] = 21600,
     memory_max_mib: Annotated[int, Field(ge=1, strict=True,
-        description="Memory limit in MiB for the command and all descendants; swap is disabled.")] = 8192,
+        description="Memory limit in MiB for the command and all descendants.")] = 8192,
 ) -> dict:
     """Run a foreground command and wait for completion in one direct MCP call.
 
@@ -341,7 +341,6 @@ async def run(
                 "--working-directory=" + str(work).replace("%", "%%"),
                 "--property=MemoryAccounting=yes", "--property=IOAccounting=yes",
                 "--property=MemoryMax=" + str(memory_max_mib * 1024**2),
-                "--property=MemorySwapMax=0",
                 "--property=OOMPolicy=kill",
                 "--property=TimeoutStartSec=" + str(timeout_seconds),
                 "--property=TimeoutStopSec=2", "--property=KillMode=control-group",

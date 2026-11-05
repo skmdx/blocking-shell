@@ -79,7 +79,7 @@ async def main():
             assert (Path(scratch['path'])/'artifact').read_text() == 'x\nx\n'
             result = json.loads(Path(repeated['result_path']).read_text())
             assert result['timeout_seconds'] == 9 and result['memory_max_bytes'] == 64*1024**2
-            assert result['memory_swap_max_bytes'] == 0
+            assert result['memory_swap_max_bytes'] is None
             assert result['accounting_error'] is None and result['cleanup_error'] is None
             assert (await call(session, 'rerun', owner='two'))['output_tail'] == 'foreign'
             await call(session, 'rerun', {'run_ref': first['run_ref']}, owner='two', error=True)

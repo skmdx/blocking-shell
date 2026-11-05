@@ -54,7 +54,7 @@ codex plugin add blocking-shell@blocking-shell
 | 設定 | 既定値・動作 |
 | --- | --- |
 | `timeout_seconds` | 6時間。1〜86400秒で変更でき、期限超過時は子孫プロセスも停止する |
-| `memory_max_mib` | 子孫全体で8 GiB。swapは禁止し、超過時はcgroup全体を停止する |
+| `memory_max_mib` | 子孫全体で8 GiB。swapはホスト側の設定に従い、メモリ枯渇時はcgroup全体を停止する |
 | `max_output_tokens` | ログ末尾1000トークン。結果メタデータは含まない |
 | `shell`・`login` | ユーザーの既定シェルで`-lc`。`login=false`なら`-c` |
 

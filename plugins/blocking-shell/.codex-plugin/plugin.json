@@ -1,6 +1,6 @@
 {
   "name": "blocking-shell",
-  "version": "0.10.2+codex.20261027.1",
+  "version": "0.10.3+codex.20261105.1",
   "description": "Run long shell commands through one blocking MCP call without polling.",
   "author": {
     "name": "skmdx"

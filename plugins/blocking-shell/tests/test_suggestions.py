@@ -55,7 +55,7 @@ async def main():
             assert await call(session, 'result') == third
             saved = json.loads(Path(third['result_path']).read_text())
             assert saved['suggestion'] == third['suggestion']
-            assert saved['memory_swap_max_bytes'] == 0
+            assert saved['memory_swap_max_bytes'] is None
             assert saved['accounting_error'] is None and saved['cleanup_error'] is None
             assert saved['io_read_bytes'] is not None and saved['io_write_bytes'] is not None
             fourth = await call(session, 'rerun')

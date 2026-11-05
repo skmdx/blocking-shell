@@ -81,17 +81,20 @@ async def main():
                     assert result["cleanup_error"] is None, result
                     assert result["timeout_seconds"] == kwargs.get("timeout_seconds", 21600), result
                     assert result["memory_max_bytes"] == kwargs.get("memory_max_mib", 8192) * 1024**2, result
-                    assert result["memory_swap_max_bytes"] == 0, result
                     if result["control_group"]:
                         assert not Path("/sys/fs/cgroup", result["control_group"].lstrip("/")).exists(), result
                     return result
 
-                # Read the actual kernel limits, then exceed a small limit in
-                # a child. The entire service must stop before its parent can
-                # report success. This allocates at most 64 MiB, without swap.
+                # Read the actual kernel limits, including unrestricted swap.
                 r = await run("python3 - <<'PY'\nfrom pathlib import Path\np = Path('/sys/fs/cgroup') / Path('/proc/self/cgroup').read_text().strip().split('0::')[1].lstrip('/')\nprint((p/'memory.max').read_text().strip(), (p/'memory.swap.max').read_text().strip(), (p/'memory.oom.group').read_text().strip())\nPY")
-                assert r["output_tail"].strip() == "8589934592 0 1", r
-                r = await run("python3 -c 'x=bytearray(256*1024*1024)' ; echo escaped-memory-limit", memory_max_mib=64)
+                assert r["output_tail"].strip() == "8589934592 max 1", r
+                assert r["memory_swap_max_bytes"] is None, r
+                # Bound swap only for this OOM test. The entire service must
+                # stop before its parent can report success.
+                r = await run('unit=$(basename "$(sed -n "s/^0:://p" /proc/self/cgroup)"); '
+                              'systemctl --user set-property --runtime "$unit" MemorySwapMax=16M || exit; '
+                              "python3 -c 'x=bytearray(256*1024*1024)' ; echo escaped-memory-limit", memory_max_mib=64)
+                assert r["memory_swap_max_bytes"] == 16*1024**2, r
                 assert r["status"] == "failed" and r["unit_result"] == "oom-kill", r
                 assert "escaped-memory-limit" not in r["output_tail"], r
                 before = set(logs.iterdir())
