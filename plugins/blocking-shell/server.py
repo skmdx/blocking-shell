@@ -369,5 +369,8 @@ async def serve():
 
 
 if __name__ == "__main__":
+    DEFAULT_WORKDIR.mkdir(parents=True, exist_ok=True)
     os.chdir(DEFAULT_WORKDIR)
+    Path(os.environ.get('SCRATCH_ROOT', DEFAULT_WORKDIR / 'tmp')).mkdir(
+        parents=True, exist_ok=True, mode=0o700)
     asyncio.run(serve())

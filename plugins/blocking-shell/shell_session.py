@@ -8,6 +8,7 @@ import sys
 import tempfile
 import tomllib
 import uuid
+from scratch_space import ScratchSpace
 
 
 DRIVER = r'''builtin printf '%s\0%s\0' "$BASHPID" "$PWD" >&198
@@ -108,7 +109,7 @@ class ShellSession:
         bash = shutil.which('bash')
         if bash is None:
             raise ValueError('Bash is required')
-        root = Path(os.environ.get('CODEX_WORK', Path.home() / 'codex-work')) / 'tmp'
+        root = ScratchSpace().root
         self.runtime = Path(tempfile.mkdtemp(prefix='blocking-shell-', dir=root))
         self.unit = 'blocking-shell-' + uuid.uuid4().hex + '.service'
         driver = self.runtime / 'driver.bash'

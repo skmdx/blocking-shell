@@ -44,6 +44,11 @@ aliasを使う場合は`shopt -s expand_aliases`を設定する。
 `workdir="$SCRATCH_DIR"`とその配下も指定できる。結果の`scratch_ref`はScratchへ渡せる。
 保存先が不要になったら削除する。実行中はleaseにより削除を防ぐ。
 
+初期作業ディレクトリと一時保存先のルートは、サーバー起動時に存在しなければ作成する。
+保存先のルートは`SCRATCH_ROOT`、未指定なら初期作業ディレクトリ下の`tmp`。
+Bashの内部通信領域もこのルートを使い、`SCRATCH_ROOT`指定時は既定の`tmp`を必要としない。
+明示的な`run`・`reset`の`workdir`は従来どおり既存ディレクトリを指定する。
+
 | 設定 | 既定値・動作 |
 | --- | --- |
 | 初期作業ディレクトリ | `CODEX_WORK`、未指定なら`~/codex-work` |
@@ -95,6 +100,7 @@ CPU・IOは実行区間のcgroupカウンタ差分で、並行するバックグ
 TMPDIRを既存の一時保存先に設定して実行する。実MCP通信とsystemdを使用する。
 
 ```sh
+uv run --script plugins/blocking-shell/tests/test_startup.py
 uv run --script plugins/blocking-shell/tests/test_repl.py
 uv run --script plugins/blocking-shell/tests/test_recovery.py
 uv run --script plugins/blocking-shell/tests/test_history.py

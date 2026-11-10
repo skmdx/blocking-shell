@@ -17,6 +17,7 @@ An optional `workdir` performs cd before execution. Initial cwd is CODEX_WORK or
 ~/codex-work. Bash login files and the user's configured BASH_ENV run once at
 startup; reset rereads them. Use `reset(login=false)` to skip login files.
 There is no environment or bashrc registration API.
+The initial cwd and scratch root are created if missing; explicit workdir must exist.
 
 Scratch storage is automatic and reused. Pass `scratch_ref` only to select a
 specific existing Scratch directory. `SCRATCH_DIR` is exported on every call;

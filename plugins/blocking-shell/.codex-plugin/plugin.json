@@ -1,6 +1,6 @@
 {
   "name": "blocking-shell",
-  "version": "0.11.0",
+  "version": "0.11.1",
   "description": "Reuse Bash state and wait for commands through one blocking MCP call.",
   "author": {
     "name": "skmdx"
