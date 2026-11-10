@@ -17,7 +17,7 @@ from mcp.client.stdio import stdio_client
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scratch_space import ScratchSpace
-from test_environment import call
+from test_repl import call
 from test_patterns import python_command
 
 
@@ -41,7 +41,7 @@ async def main():
                     yield session
 
         arguments = dict(cmd=python_command(), workdir=directory, scratch_ref=scratch['scratch_ref'],
-                         shell='/bin/bash', login=False, memory_max_mib=64, max_output_tokens=30)
+                         memory_max_mib=64, max_output_tokens=30)
         async with connect() as session:
             first = await call(session, 'run', arguments)
             assert first['exit_code'] == 0 and 'suggestion' not in first, first

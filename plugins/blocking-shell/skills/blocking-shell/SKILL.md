@@ -1,118 +1,66 @@
 ---
 name: blocking-shell
-description: Run long builds, test suites, and other foreground shell commands through a single blocking MCP call. Blocking until completion avoids polling and can reduce token use compared with exec_command for long-running tasks.
+description: Reuse Bash variables, functions and cwd across blocking MCP calls. Use for successive shell snippets and long builds or tests without polling.
 ---
 
-## Run and assess
+## Run in the persistent Bash
 
-Call `run` directly, outside code-mode cells, for authorized long-running commands.
-Announce the command first. Supply `cmd`, an existing `workdir`, and `scratch_ref`
-from Scratch's `create`. Keep commands in the foreground and noninteractive.
-The call waits for completion; normal use needs no subsequent status request.
+Call `run` directly, outside code-mode cells, for authorized commands.
+Announce long work first. Usually pass only `cmd`; the call waits for completion.
 
-Prefer paths relative to `workdir`. For work inside the selected Scratch directory,
-use `$SCRATCH_DIR` as `workdir`, optionally with a `/subdir`.
-The braced form also works; other variables and shell expressions are not expanded.
-In `cmd`, use `"$SCRATCH_DIR"` to access that directory.
-The tool supplies this variable on every run, overriding environment settings.
+Use `export`, `unset`, `source`, functions and `cd` normally. State persists within
+this conversation, and calls serialize. Use `declare -p NAME`, `declare -f NAME`
+or `compgen -v` to inspect it. Enable `shopt -s expand_aliases` for aliases.
+Keep work noninteractive and in the foreground when its completion matters.
 
-Assess `status` and `exit_code`. `state: finished` means the result is final,
-not that the command succeeded. Read `log_path` or `result_path` only when the
-returned summary leaves a question unanswered. Log truncation preserves the full
-log on disk. Unavailable counters are null, not zero; IO measures block-device
-traffic including descendants. Inspect `accounting_error` or `cleanup_error`
-when present before relying on measurements or cleanup.
+An optional `workdir` performs cd before execution. Initial cwd is CODEX_WORK or
+~/codex-work. Bash login files and the user's configured BASH_ENV run once at
+startup; reset rereads them. Use `reset(login=false)` to skip login files.
+There is no environment or bashrc registration API.
 
-Normally keep the default execution deadline and memory limit. Change them for
-known execution requirements, not a guessed build duration. Memory exhaustion,
-timeout and cancellation stop the command group. Do not automatically retry
-memory exhaustion or bypass its limit.
-After using the results, call Scratch's `delete`. Active leases prevent deletion;
-retry skipped or failed cleanup after the work has ended.
+Scratch storage is automatic and reused. Pass `scratch_ref` only to select a
+specific existing Scratch directory. `SCRATCH_DIR` is exported on every call;
+`workdir="$SCRATCH_DIR"` and its subdirectories are supported.
+Use the returned scratch_ref with Scratch delete when logs are no longer needed.
+An active execution holds a lease. Move cwd out of storage before deleting it.
 
-An optional `suggestion` flags repeated long commands or shared steps worth
-moving into a script or existing tool. It is advisory; it does not rewrite or
-execute anything. Absent means no new suggestion, not proof of no repetition.
+## Assess and recover
 
-## Recover a result or repeat a command
+Check status and exit_code. Finished means final, not necessarily successful.
+Only read log_path or result_path when the returned tail leaves a question.
+Full output stays on disk. CPU/IO are cgroup deltas over the execution interval,
+including background jobs; session_memory_peak_bytes covers the entire Bash
+lifetime. Missing counters are null. Investigate accounting_error or cleanup_error
+before relying on measurements or cleanup.
 
-After a lost response or reconnect, call `result()` before considering a rerun.
-It returns the last accepted execution in this conversation. With concurrent
-runs, acceptance order differs from completion order; inspect the returned
-`run_ref`. Use `result(run_ref=...)` for a known execution.
+Normally retain the timeout and memory settings. Default timeout is six hours
+per call; initial memory limit is 8 GiB for Bash and descendants. A changed memory
+limit persists. Do not automatically retry or raise limits after exhaustion.
 
-A finished result has the same summary as `run`. Otherwise `state` distinguishes
-`running`, `finishing`, `unknown` and `expired`. Missing units or saved results
-do not establish success. No command is restarted and no job recovery occurs.
-While available, elapsed time, CPU, peak memory, IO and log fields use the same
-names as `run`; they are snapshots, not final results. `unit` and `pid` identify
-the systemd unit and its execution process, including in finished summaries.
-The PID is historical after exit; unavailable values are null. Status and exit
-code are returned only with a saved final result.
-Use this for exceptional recovery, not periodic polling.
+Ordinary nonzero exit status retains state. Shell exit (including exec or errexit),
+timeout, cancellation and OOM lose it. After state_lost, call reset and restore
+only needed setup. Reset stops descendants and clears Bash state, retaining
+omitted cwd/login/memory settings and all saved results. Invalid paths do not
+discard a live shell. Server restart loses Bash state; compaction alone does not.
 
-`rerun()` repeats the last accepted command with its saved execution conditions,
-current environment settings and fresh logs. Pass `run_ref` to select an earlier
-execution from this conversation; older records without saved settings fail.
-Pass `scratch_ref` to replace a
-deleted storage reference. History survives reconnects and compaction; invalid
-requests do not replace it. Re-execution repeats side effects and requires the
-same authorization as `run`.
+After a lost response, use result() before deciding to repeat side effects.
+Omit run_ref for the last accepted execution. Finished summaries match run;
+running, unknown and expired do not establish success. Use this for exceptional
+recovery, not polling. History survives server restart.
 
-## Configure commands
+rerun() repeats the last accepted cmd and settings in current Bash state.
+Select earlier work with run_ref; replace deleted storage with scratch_ref.
+It repeats side effects and requires the same authorization as run.
+An optional suggestion about repeated long commands is advisory.
 
-Choose by lifetime and whether setup needs shell code:
+Background jobs persist until they end, reset or server shutdown. Commands have
+no interactive stdin or PTY. FD 197/198 and names beginning __blocking_shell_
+are reserved for the driver. Do not modify them.
 
-| Situation | Use |
-| --- | --- |
-| One command needs a different value or setup | Put `CC=clang make` or `source ./sdk-env.sh && make` in `cmd` |
-| Several commands in this conversation need the same literal values | `set_env(values={"CC": "clang"})` |
-| Several commands need functions, aliases or SDK initialization | `set_bashrc(script="source ./sdk-env.sh")` |
-| Settings should apply across conversations and tools | The shared `BASH_ENV` file |
+## Wait for an already running command
 
-No setup call is needed for ordinary commands. Registered Bash code runs before
-every subsequent command, relative to that command's `workdir`; use a stable path
-when working directories vary. Keep the actual build or test in `cmd`.
-Remove temporary overrides with `unset_env(names=[...])` and registered scripts
-with `delete_bashrc(ref=...)` when their purpose ends.
-
-Keep shared aliases, functions and environment settings in the Bash file selected
-by top-level `shell_environment_policy.set.BASH_ENV` in the user
-`$CODEX_HOME/config.toml` (default `~/.codex/config.toml`). Each run rereads this
-setting, falling back to inherited `BASH_ENV` when absent. Project, profile and
-CLI overrides are not read. Bash reads the file with either login setting.
-
-Use per-command assignments in `cmd`. For conversation overrides, use `set_env`
-and `unset_env`; their responses identify changed names. `list_env` reads all
-configured values. Overrides survive reconnects and apply to subsequent
-`run`/`rerun` only. They take precedence over inherited values and the user
-configuration, but shell startup files may change them. Later changes in another
-shell are not inherited. Compaction restores configured names, not their values;
-commands still receive the stored values without an extra read.
-
-For conversation-specific Bash startup code, use `set_bashrc(script=...)`.
-Keep its returned `ref` to replace or delete it. Scripts run in registration order,
-after ordinary Bash startup and before `cmd`; a nonzero source status stops the
-remaining scripts and command. Registered scripts require Bash. Use
-`shopt -s expand_aliases` for aliases; do not introduce interactive prompts.
-
-`list_bashrc` lists refs in execution order. `get_bashrc(refs=[...])` reads selected
-bodies together, preserving input order and errors per ref. If `next_cursor` is
-non-null, repeat the same selection with that cursor and concatenate each body's
-fragments by character offset. A changed selection rejects continuation: restart
-without the cursor. Scripts persist across reconnects and compaction; changes
-affect subsequent commands, not running jobs.
-
-## Wait for work started with exec_command
-
-If an existing command runs longer than expected, one direct `run` call with
-`cmd: "tail --pid=12345 -f /dev/null"` (GNU tail) can replace repeated polling.
-Use the actual OS PID of the command or a wrapper that waits for all its work,
-not an exec session ID or persistent shell. Obtain it from existing output or
-one targeted lookup, and supply `workdir` and `scratch_ref` normally.
-Do not restart the original command.
-
-After the wait returns, call `write_stdin` once on the original session for its
-output and exit code. A successful tail exit only confirms that the PID vanished.
-The original job stays outside blocking-shell's cgroup; the wait's limits,
-cancellation and statistics apply only to the waiting process.
+One run call with `tail --pid=PID -f /dev/null` (GNU tail) can wait for an existing
+OS process without polling. Use the actual process PID, not an exec session ID
+or persistent shell PID. Then read the original session's output once.
+The wait's success confirms only that the PID vanished; its limits and resource
+statistics apply to the waiting process, not the original work.

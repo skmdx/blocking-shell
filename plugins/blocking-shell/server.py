@@ -2,18 +2,15 @@
 # requires-python = ">=3.11"
 # dependencies = ["mcp>=1.12,<2", "tiktoken>=0.12,<1", "tree-sitter>=0.25,<0.26", "tree-sitter-bash>=0.25,<0.26"]
 # ///
-"""Run foreground shell commands in one blocking MCP request."""
+"""Persistent Bash execution with blocking replies and durable results."""
 import asyncio
-from contextlib import contextmanager
+from contextlib import asynccontextmanager
 import fcntl
 import json
 import os
 from pathlib import Path
-import pwd
-import shlex
-import shutil
+import signal
 import time
-import tomllib
 from typing import Annotated
 
 import anyio
@@ -22,10 +19,28 @@ from pydantic import Field
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import ToolAnnotations
 from scratch_space import ScratchSpace
-from word_ids import create_directory
 from session_state import SessionState
+from shell_session import ShellSession, command_source, counter, metrics, snapshot
 
-mcp = FastMCP("blocking-shell")
+DEFAULT_WORKDIR = Path(os.environ.get('CODEX_WORK', Path.home() / 'codex-work'))
+sessions: dict[str, ShellSession] = {}
+terminating = False
+
+
+@asynccontextmanager
+async def lifespan(app):
+    try:
+        yield
+    finally:
+        with anyio.CancelScope(shield=True):
+            await asyncio.gather(*(shell.close() for shell in sessions.values()))
+        if terminating:
+            # The SDK's stdin reader can be blocked in a worker thread. All
+            # requests and shells are finalized here; do not wait for more stdin.
+            os._exit(128 + signal.SIGTERM)
+
+
+mcp = FastMCP("blocking-shell", lifespan=lifespan)
 encoding = tiktoken.get_encoding("o200k_base")
 max_token_bytes = max(map(len, encoding.token_byte_values()))
 
@@ -34,110 +49,6 @@ def session_state(ctx: Context) -> SessionState:
     meta = ctx.request_context.meta
     values = meta.model_dump() if meta else {}
     return SessionState(values.get('threadId', os.environ.get('CODEX_THREAD_ID')))
-
-
-def command_overrides(state: SessionState) -> dict[str, str]:
-    # MCP processes do not inherit Codex's shell_environment_policy.set.
-    config = Path(os.environ.get('CODEX_HOME', Path.home()/'.codex')) / 'config.toml'
-    try:
-        with config.open('rb') as stream:
-            settings = tomllib.load(stream)
-    except FileNotFoundError:
-        settings = {}
-    bash_env = settings.get('shell_environment_policy', {}).get('set', {}).get('BASH_ENV')
-    overrides = {}
-    if bash_env is not None:
-        if not isinstance(bash_env, str) or '\0' in bash_env:
-            raise ValueError('shell_environment_policy.set.BASH_ENV must be a string without NUL')
-        overrides['BASH_ENV'] = bash_env
-    overrides.update(state.list())
-    return overrides
-
-
-@mcp.tool(structured_output=False, annotations=ToolAnnotations(openWorldHint=False))
-def set_bashrc(script: str, ctx: Context, ref: str | None = None) -> dict:
-    """Register Bash source text for this conversation, or replace it by ref.
-
-    Use for functions, aliases or SDK setup needed by several commands. For
-    literal environment values use set_env; for one-off setup put it in cmd.
-    Omit ref to append a script and receive its ID; editing preserves its order.
-    Each run/rerun sources scripts in registration order after normal Bash startup,
-    before cmd. Nonzero source status stops execution. Survives reconnects and
-    compaction; other conversations and running jobs are unaffected.
-    """
-    return {'ref': session_state(ctx).set_script(script, ref)}
-
-
-@mcp.tool(structured_output=False, annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False))
-def get_bashrc(
-    refs: Annotated[list[str], Field(min_length=1, max_length=100)],
-    ctx: Context,
-    cursor: str | None = None,
-) -> dict:
-    """Read selected Bash scripts in input order, with per-ref errors.
-
-    Returns up to 16000 source characters; offsets are character positions.
-    Repeat the same refs with next_cursor until null. A changed selection fails
-    continuation: restart without cursor. Missing refs do not discard successes.
-    """
-    return session_state(ctx).script_page(refs, cursor)
-
-
-@mcp.tool(structured_output=False, annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False))
-def list_bashrc(ctx: Context) -> dict:
-    """List this conversation's Bash script refs in execution order, without source text."""
-    return {'refs': [item['ref'] for item in session_state(ctx).scripts()]}
-
-
-@mcp.tool(structured_output=False, annotations=ToolAnnotations(destructiveHint=True, openWorldHint=False))
-def delete_bashrc(ref: str, ctx: Context) -> dict:
-    """Delete a Bash script by ref from this conversation; unknown refs are errors."""
-    session_state(ctx).delete_script(ref)
-    return {'deleted': ref}
-
-
-@mcp.tool(structured_output=False, annotations=ToolAnnotations(openWorldHint=False))
-def set_env(values: dict[str, str], ctx: Context) -> dict:
-    """Set or replace environment overrides for this conversation's subsequent runs.
-
-    Use for repeated settings such as CC=clang; one-off assignments belong in cmd.
-    Values are literal strings. Other variables stay unchanged. Survives MCP
-    reconnects and compaction; applies only to blocking-shell, not other tools.
-    Names are restored to model context after automatic compaction.
-    Returns set names; list_env reads values. Running commands are unaffected.
-    """
-    changed = session_state(ctx).update(values, [])
-    return {'set': changed.get('set', [])}
-
-
-@mcp.tool(structured_output=False, annotations=ToolAnnotations(destructiveHint=True, openWorldHint=False))
-def unset_env(names: list[str], ctx: Context) -> dict:
-    """Remove named overrides from this conversation; absent names are harmless.
-
-    Subsequent runs fall back to Codex BASH_ENV configuration or inherited values.
-    Does not unset the server's own environment or change running commands.
-    Returns removed and missing names; list_env reads remaining values.
-    """
-    return session_state(ctx).update({}, names)
-
-
-@mcp.tool(structured_output=False, annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False))
-def list_env(ctx: Context) -> dict:
-    """Return this conversation's tool-configured environment names and values.
-
-    Excludes inherited variables and per-command assignments.
-    """
-    return {'variables': session_state(ctx).list()}
-
-
-@contextmanager
-def result_directory(scratch_ref: str):
-    with ScratchSpace().lease(scratch_ref) as logs:
-        out = create_directory(logs, prefix="blocking-shell-")
-        # Unlike a PID, this ownership proof cannot survive a dead server or PID reuse.
-        with (out / 'active.lock').open('wb') as owner:
-            fcntl.flock(owner, fcntl.LOCK_EX)
-            yield out
 
 
 def output_tail(log: Path, budget: int) -> tuple[str, int, bool]:
@@ -162,57 +73,178 @@ def output_tail(log: Path, budget: int) -> tuple[str, int, bool]:
     return tail, len(tokens), truncated
 
 
-async def control(environment: dict[str, str], *args: str) -> tuple[int, str]:
-    proc = await asyncio.create_subprocess_exec(
-        "systemctl", "--user", *args, stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT, env=environment)
-    output, _ = await proc.communicate()
-    return proc.returncode or 0, output.decode(errors="replace")
 
-
-def counter(properties: dict[str, str], name: str) -> int | None:
-    value = properties.get(name, "")
-    if not value.isdecimal() or int(value) == 2**64 - 1:
-        return None
-    return int(value)
-
-
-def summarize(result: dict) -> dict:
-    summary = {key: result[key] for key in (
-        "run_ref", "state",
-        "status", "exit_code", "elapsed_seconds", "cpu_seconds", "memory_peak_bytes",
-        "io_read_bytes", "io_write_bytes", "output_tail", "output_truncated",
-        "log_path", "result_path")}
-    summary.update(unit=result['unit'], pid=result.get('pid'))
-    for key in ("accounting_error", "cleanup_error"):
-        if result[key] is not None:
-            summary[key] = result[key]
-    if result.get('suggestion'):
-        summary['suggestion'] = result['suggestion']
-    if result["status"] != "completed" or result["exit_code"] != 0 or any(
-            result[key] is not None for key in ("accounting_error", "cleanup_error")):
-        summary.update({key: result[key] for key in ("unit", "unit_result", "systemd_log_path")})
+def summarize(data: dict) -> dict:
+    keys = ('run_ref', 'state', 'status', 'exit_code', 'elapsed_seconds',
+            'cpu_seconds', 'session_memory_peak_bytes', 'io_read_bytes', 'io_write_bytes',
+            'output_tail', 'output_truncated', 'log_path', 'result_path',
+            'scratch_ref', 'unit', 'pid', 'workdir')
+    summary = {key: data[key] for key in keys if key in data}
+    for key in ('state_lost', 'accounting_error', 'cleanup_error', 'suggestion'):
+        if data.get(key):
+            summary[key] = data[key]
+    if data['status'] != 'completed' or data.get('state_lost'):
+        summary.update(unit_result=data.get('unit_result'),
+                       systemd_log_path=data.get('systemd_log_path'))
     return summary
 
 
-def execution_metrics(properties: dict[str, str]) -> dict:
-    cpu_ns = counter(properties, 'CPUUsageNSec')
-    return dict(pid=counter(properties, 'ExecMainPID') or None,
-                cpu_seconds=cpu_ns / 1e9 if cpu_ns is not None else None,
-                memory_peak_bytes=counter(properties, 'MemoryPeak'),
-                io_read_bytes=counter(properties, 'IOReadBytes'),
-                io_write_bytes=counter(properties, 'IOWriteBytes'))
+def work_directory(value: str | None, scratch: Path) -> Path | None:
+    if value is None:
+        return None
+    for variable in ('$SCRATCH_DIR', '${SCRATCH_DIR}'):
+        if value == variable or value.startswith(variable + '/'):
+            value = str(scratch) + value[len(variable):]
+            break
+    path = Path(value)
+    if not path.is_absolute() or not path.is_dir():
+        raise ValueError('workdir must be an existing absolute directory after scratch expansion')
+    return path
+
+
+def default_scratch(shell: ShellSession, state: SessionState) -> str:
+    space = ScratchSpace(session=state.session)
+    if shell.scratch_ref:
+        try:
+            with space.lease(shell.scratch_ref):
+                return shell.scratch_ref
+        except (ValueError, FileNotFoundError):
+            pass
+    reference = space.create()['scratch_ref']
+    shell.scratch_ref = reference
+    return reference
+
+
+@mcp.tool(structured_output=False, annotations=ToolAnnotations(destructiveHint=True, openWorldHint=True))
+async def run(
+    cmd: Annotated[str, Field(description="Bash code; variables, exports, functions and cd persist.")],
+    ctx: Context,
+    workdir: Annotated[str | None, Field(
+        description="Optional cd before execution; absolute path or $SCRATCH_DIR[/subdir].")] = None,
+    scratch_ref: Annotated[str | None, Field(
+        description="Scratch storage for logs; omitted selects reusable automatic storage.")] = None,
+    max_output_tokens: Annotated[int, Field(ge=0, strict=True,
+        description="Returned log tail token limit, default 1000; full output is saved.")] = 1000,
+    timeout_seconds: Annotated[int, Field(ge=1, le=86400, strict=True,
+        description="Foreground execution deadline; default six hours.")] = 21600,
+    memory_max_mib: Annotated[int | None, Field(ge=1, strict=True,
+        description="Persistent shell and descendants' limit; initially 8192 MiB, then retained.")] = None,
+) -> dict:
+    """Run Bash and wait for completion. Usually pass only cmd.
+
+    One noninteractive Bash per conversation; calls serialize. Startup files and
+    BASH_ENV run once. Use export, source, cd, unset, declare -p and declare -f
+    directly. Default cwd is CODEX_WORK or ~/codex-work. No stdin or PTY.
+    Returns bounded output, saved logs and CPU/IO deltas; memory peak covers the
+    whole shell session. Timeout/cancellation/OOM/exit lose state: call reset.
+    Server restart loses shell state; compaction retains it while the server lives.
+    Use result after lost responses, Scratch delete when logs are no longer needed.
+    """
+    if '\0' in cmd:
+        raise ValueError('cmd must not contain NUL')
+    state = session_state(ctx)
+    shell = sessions.setdefault(state.session, ShellSession(DEFAULT_WORKDIR))
+    async with shell.lock:
+        if shell.lost:
+            raise ValueError(f'Bash state lost ({shell.lost}); call reset before run')
+        ref = scratch_ref or default_scratch(shell, state)
+        with ScratchSpace().lease(ref) as logs:
+            work = work_directory(workdir, logs)
+            if not shell.unit and work:
+                shell.workdir = work
+            if not shell.unit and memory_max_mib is not None:
+                shell.memory_max_mib = memory_max_mib
+            try:
+                await shell.start()
+            except BaseException:
+                with anyio.CancelScope(shield=True):
+                    await shell.close()
+                raise
+            before = await shell.limits(memory_max_mib)
+            unit = shell.unit
+            assert unit is not None
+            started = time.monotonic()
+            arguments = dict(cmd=cmd, workdir=workdir, scratch_ref=ref,
+                             max_output_tokens=max_output_tokens, timeout_seconds=timeout_seconds,
+                             memory_max_mib=shell.memory_max_mib)
+            out = state.accept(arguments, logs, dict(scratch_ref=ref, unit=shell.unit,
+                                                    started=started, before=before))
+            with (out / 'active.lock').open('wb') as owner:
+                fcntl.flock(owner, fcntl.LOCK_EX)
+                log = out / 'output.log'
+                log.touch()
+                (out / 'command.bash').write_text(command_source(cmd, work, logs))
+                data: dict = dict(run_ref=out.name.removeprefix('blocking-shell-'),
+                            state='finished', scratch_ref=ref, unit=shell.unit,
+                            log_path=str(log), result_path=str(out / 'result.json'),
+                            systemd_log_path=str(out / 'systemd.log'), arguments=arguments)
+                status, exit_code, lost = 'completed', None, None
+                try:
+                    await shell.arm_deadline(timeout_seconds)
+                    async with asyncio.timeout(timeout_seconds):
+                        exit_code, cwd = await shell.execute(out)
+                    shell.workdir = Path(cwd)
+                    if exit_code:
+                        status = 'failed'
+                except TimeoutError:
+                    status, lost = 'timeout', 'execution deadline exceeded'
+                except (EOFError, ConnectionError, asyncio.IncompleteReadError) as error:
+                    status, lost = 'failed', str(error) or 'Bash exited'
+                except asyncio.CancelledError:
+                    status, lost = 'cancelled', 'execution cancelled'
+                    raise
+                except Exception:
+                    status, lost = 'failed', 'execution control failed'
+                    raise
+                finally:
+                    with anyio.CancelScope(shield=True):
+                        after, accounting_error = await snapshot(shell.env, unit)
+                        if lost and status == 'failed':
+                            code = counter(after, 'ExecMainStatus')
+                            if after.get('ExecMainCode') in ('2', '3') and code is not None:
+                                code = -code
+                            exit_code = code if after.get('ExecMainCode') != '0' else None
+                            if after.get('Result') == 'timeout':
+                                status = 'timeout'
+                        cleanup_error = None
+                        if not lost:
+                            cleanup_error = await shell.idle()
+                            if cleanup_error:
+                                lost = 'could not clear execution deadline'
+                        if lost:
+                            assert shell.runtime is not None
+                            shell.lost = lost
+                            (out / 'systemd.log').write_text(
+                                (shell.runtime / 'systemd.log').read_text() +
+                                (shell.runtime / 'startup.log').read_text() +
+                                json.dumps(after, indent=2))
+                            cleanup_error = await shell.close() or cleanup_error
+                        tail, count, truncated = output_tail(log, max_output_tokens)
+                        data.update(status=status, exit_code=exit_code, state_lost=lost,
+                                    elapsed_seconds=round(time.monotonic() - started, 3),
+                                    **metrics(before, after), output_tail=tail,
+                                    output_tokens=count, output_truncated=truncated,
+                                    workdir=str(shell.workdir), accounting_error=accounting_error,
+                                    cleanup_error=cleanup_error, unit_result=after.get('Result'),
+                                    properties=after, timeout_seconds=timeout_seconds,
+                                    memory_max_bytes=counter(after, 'MemoryMax'),
+                                    memory_swap_max_bytes=counter(after, 'MemorySwapMax'),
+                                    control_group=after.get('ControlGroup'),
+                                    output_bytes=log.stat().st_size, output_token_encoding='o200k_base')
+                        data['suggestion'] = state.suggestion(cmd, str(work or shell.workdir), 'bash')
+                        pending = out / 'result.pending'
+                        pending.write_text(json.dumps(data, ensure_ascii=False, indent=2))
+                        pending.replace(out / 'result.json')
+                return summarize(data)
 
 
 @mcp.tool(structured_output=False, annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False))
 async def result(ctx: Context, run_ref: str | None = None) -> dict:
-    """Recover an execution result after a lost response or reconnection.
+    """Recover a result without rerunning; omit run_ref for the last accepted call.
 
-    Omit run_ref for this conversation's last accepted execution (not last completed).
-    Finished results match run/rerun summaries. Otherwise state is running, finishing,
-    unknown, or expired; available metrics and logs use run's field names.
-    Unit and execution PID identify the command; no exit code is inferred.
-    This never reruns a command.
+    Finished results match run. Otherwise state is running, unknown or expired.
+    History survives server restart; missing logs or ownership never imply success.
+    Use after transport failure, not for routine polling.
     """
     record = session_state(ctx).execution(run_ref)
     reference = record['run_ref']
@@ -222,213 +254,120 @@ async def result(ctx: Context, run_ref: str | None = None) -> dict:
             saved = out / 'result.json'
             if not out.is_dir():
                 return dict(run_ref=reference, state='expired')
-            try:
-                if saved.exists():
-                    return summarize(json.loads(saved.read_text()))
-                code, output = await control(dict(os.environ), 'show', record['unit'],
-                    '--property=LoadState,ActiveState,SubState,ExecMainPID,CPUUsageNSec,'
-                    'MemoryPeak,IOReadBytes,IOWriteBytes,ExecMainStartTimestampMonotonic')
-                finalizing = False
-                with (out / 'active.lock').open('rb') as owner:
-                    try:
-                        fcntl.flock(owner, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    except BlockingIOError:
-                        finalizing = True
-                # Finalization can finish while systemd is being queried.
-                if saved.exists():
-                    return summarize(json.loads(saved.read_text()))
-            except (OSError, json.JSONDecodeError) as error:
-                return dict(run_ref=reference, state='unknown', reason=str(error))
-            properties = dict(line.split('=', 1) for line in output.splitlines() if '=' in line)
-            snapshot: dict = dict(run_ref=reference, unit=record['unit'],
-                            log_path=str(out / 'output.log'), result_path=str(saved),
-                            **execution_metrics(properties if code == 0 else {}))
-            start_us = counter(properties, 'ExecMainStartTimestampMonotonic') if code == 0 else None
-            snapshot['elapsed_seconds'] = (
-                round(time.monotonic() - start_us / 1e6, 3) if start_us else None)
-            try:
-                tail, _, truncated = output_tail(out / 'output.log',
-                    record.get('arguments', {}).get('max_output_tokens', 1000))
-                snapshot.update(output_tail=tail, output_truncated=truncated)
-            except OSError as error:
-                return dict(snapshot, state='unknown', reason=str(error))
-            if code:
-                snapshot['accounting_error'] = output.strip()
-            if code == 0 and properties.get('LoadState') == 'loaded':
-                if properties.get('SubState') in ('start', 'running'):
-                    return dict(snapshot, state='running')
-                if finalizing and (properties.get('ActiveState') == 'deactivating' or
-                                   properties.get('SubState') == 'exited'):
-                    return dict(snapshot, state='finishing')
-            return dict(snapshot, state='unknown',
-                        reason='No saved result and no confirmed active execution')
+            if saved.exists():
+                return summarize(json.loads(saved.read_text()))
+            with (out / 'active.lock').open('rb') as owner:
+                try:
+                    fcntl.flock(owner, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    active = True
+                else:
+                    active = False
+            if not active:
+                return dict(run_ref=reference, state='unknown',
+                            reason='No saved result and no active request owner')
+            after, error = await snapshot(dict(os.environ), record['unit'])
+            if saved.exists():
+                return summarize(json.loads(saved.read_text()))
+            tail, _, truncated = output_tail(out / 'output.log',
+                record.get('arguments', {}).get('max_output_tokens', 1000))
+            data = dict(run_ref=reference, state='running', unit=record['unit'],
+                        **metrics(record.get('before', {}), after),
+                        elapsed_seconds=round(time.monotonic() - record['started'], 3)
+                            if record.get('started') is not None else None,
+                        output_tail=tail, output_truncated=truncated,
+                        log_path=str(out / 'output.log'), result_path=str(saved))
+            if error:
+                data['accounting_error'] = error
+            return data
     except (ValueError, FileNotFoundError):
         return dict(run_ref=reference, state='expired')
 
 
 @mcp.tool(structured_output=False, annotations=ToolAnnotations(destructiveHint=True, openWorldHint=True))
-async def run(
-    cmd: Annotated[str, Field(
-        description="Foreground command, including any per-command environment assignments.")],
-    workdir: Annotated[str, Field(description="Existing absolute working directory; accepts $SCRATCH_DIR or ${SCRATCH_DIR}, optionally followed by /subdir.")],
-    scratch_ref: Annotated[str, Field(description="ID from scratch.create for saved logs and results; its path is exposed as SCRATCH_DIR.")],
-    ctx: Context,
-    max_output_tokens: Annotated[int, Field(ge=0, strict=True,
-        description="Maximum tokens in the returned log tail (default 1000), excluding metadata; full logs are saved.")] = 1000,
-    shell: Annotated[str | None, Field(
-        description="Shell executable; omit for the user's default shell. "
-                    "Specify when cmd requires a particular shell syntax.")] = None,
-    login: Annotated[bool, Field(
-        description="Use -lc (login startup files). Set false for -c to skip login "
-                    "startup files. Bash still reads BASH_ENV in either mode.")] = True,
-    timeout_seconds: Annotated[int, Field(ge=1, le=86400, strict=True,
-        description="Execution deadline in seconds, default six hours. Set when a "
-                    "different deadline is needed; expiry stops the command and descendants.")] = 21600,
-    memory_max_mib: Annotated[int, Field(ge=1, strict=True,
-        description="Memory limit in MiB for the command and all descendants.")] = 8192,
-) -> dict:
-    """Run a foreground command and wait for completion in one direct MCP call.
+async def rerun(ctx: Context, run_ref: str | None = None, scratch_ref: str | None = None) -> dict:
+    """Repeat the last or selected command in current Bash state, with fresh logs.
 
-    No interactive input. Returns status, exit code, bounded output_tail, saved log
-    paths and cgroup resource statistics. accounting_error and cleanup_error appear
-    only on failure; unavailable counters remain null. Full metadata and applied
-    limits are saved at result_path; abnormal results also include systemd diagnostics.
-    run_ref identifies this execution for result() after reconnection.
-    Timeout, cancellation and memory exhaustion stop the command group.
-    Use scratch.delete after the saved results are no longer needed.
-    """
-    executable = shell or pwd.getpwuid(os.getuid()).pw_shell
-    environment = dict(os.environ)
-    state = session_state(ctx)
-    overrides = command_overrides(state)
-    scripts = state.scripts()
-    if scripts:
-        if (Path(executable).name == 'sh' or
-                Path(shutil.which(executable) or executable).resolve().name != 'bash'):
-            raise ValueError('Registered bashrc scripts require Bash; select Bash or delete the scripts')
-    with result_directory(scratch_ref) as out:
-        expanded_workdir = workdir
-        for variable in ("$SCRATCH_DIR", "${SCRATCH_DIR}"):
-            if workdir == variable or workdir.startswith(variable + "/"):
-                expanded_workdir = str(out.parent) + workdir[len(variable):]
-                break
-        work = Path(expanded_workdir)
-        if not work.is_absolute() or not work.is_dir():
-            raise ValueError("workdir must be an existing absolute directory after scratch expansion")
-        startup = []
-        for item in scripts:
-            file = out / (item['ref'] + '.bash')
-            file.write_text(item['script'], encoding='utf-8')
-            startup.append(f'source {shlex.quote(str(file))} || exit $?\n')
-        command = ''.join(startup) + cmd
-        log = out / "output.log"
-        log.touch()
-        unit = out.name + ".service"
-        run_ref = out.name.removeprefix('blocking-shell-')
-        state.command(dict(cmd=cmd, workdir=workdir, scratch_ref=scratch_ref,
-                           max_output_tokens=max_output_tokens, shell=executable, login=login,
-                           timeout_seconds=timeout_seconds, memory_max_mib=memory_max_mib),
-                      dict(run_ref=run_ref, scratch_ref=scratch_ref, unit=unit))
-        manager_log = out / "systemd.log"
-        started = time.monotonic()
-        status = "completed"
-        suggestion = state.suggestion(cmd, str(work), executable)
-        result: dict = {'suggestion': suggestion} if suggestion else {}
-        with manager_log.open("wb") as stream:
-            proc = await asyncio.create_subprocess_exec(
-                "systemd-run", "--user", "--service-type=oneshot", "--remain-after-exit",
-                "--unit=" + unit, "--expand-environment=no",
-                "--working-directory=" + str(work).replace("%", "%%"),
-                "--property=MemoryAccounting=yes", "--property=IOAccounting=yes",
-                "--property=MemoryMax=" + str(memory_max_mib * 1024**2),
-                "--property=OOMPolicy=kill",
-                "--property=TimeoutStartSec=" + str(timeout_seconds),
-                "--property=TimeoutStopSec=2", "--property=KillMode=control-group",
-                "--property=StandardInput=null",
-                "--property=StandardOutput=append:" + str(log).replace("%", "%%"),
-                "--property=StandardError=inherit",
-                *("--setenv=" + key for key in environment),
-                *("--setenv=" + key + "=" + value for key, value in overrides.items()),
-                "--setenv=SCRATCH_DIR=" + str(out.parent),
-                executable, "-lc" if login else "-c", command,
-                cwd=work, stdin=asyncio.subprocess.DEVNULL,
-                stdout=stream, stderr=stream, env=environment)
-            try:
-                await proc.wait()
-                if proc.returncode:
-                    status = "failed"
-            except BaseException:
-                status = "cancelled"
-                raise
-            finally:
-                with anyio.CancelScope(shield=True):
-                    code, accounting = await control(environment, "show", unit, "--property=" + ",".join((
-                        "Result", "ExecMainCode", "ExecMainStatus", "ExecMainPID", "CPUUsageNSec",
-                        "MemoryPeak", "MemoryMax", "MemorySwapMax",
-                        "IOReadBytes", "IOWriteBytes", "ControlGroup")))
-                    properties = dict(line.split("=", 1) for line in accounting.splitlines()
-                                      if "=" in line) if code == 0 else {}
-                    stop_code, stop_output = await control(environment, "stop", unit)
-                    await proc.wait()
-                    await control(environment, "reset-failed", unit)
-                    if status != "cancelled" and properties.get("Result") == "timeout":
-                        status = "timeout"
-                    exit_code = counter(properties, "ExecMainStatus")
-                    if properties.get("ExecMainCode") in ("2", "3") and exit_code is not None:
-                        exit_code = -exit_code
-                    if status == "cancelled" and properties.get("ExecMainCode") == "0":
-                        exit_code = None
-                    size = log.stat().st_size
-                    tail, token_count, truncated = output_tail(log, max_output_tokens)
-                    result.update(run_ref=run_ref, state='finished', status=status, exit_code=exit_code,
-                                  timeout_seconds=timeout_seconds,
-                                  **execution_metrics(properties),
-                                  memory_max_bytes=counter(properties, "MemoryMax"),
-                                  memory_swap_max_bytes=counter(properties, "MemorySwapMax"),
-                                  unit=unit, unit_result=properties.get("Result"),
-                                  control_group=properties.get("ControlGroup"),
-                                  accounting_error=accounting.strip() if code else None,
-                                  cleanup_error=stop_output.strip() if stop_code else None,
-                                  systemd_log_path=str(manager_log),
-                                  elapsed_seconds=round(time.monotonic() - started, 3),
-                                  output_tail=tail, output_bytes=size,
-                                  output_tokens=token_count, output_token_encoding=encoding.name,
-                                  output_truncated=truncated,
-                                  log_path=str(log), result_path=str(out / "result.json"))
-                    pending = out / 'result.pending'
-                    pending.write_text(json.dumps(result, indent=2) + "\n")
-                    pending.replace(out / 'result.json')
-    return summarize(result)
-
-
-@mcp.tool(structured_output=False, annotations=ToolAnnotations(destructiveHint=True, openWorldHint=True))
-async def rerun(
-    ctx: Context,
-    scratch_ref: Annotated[str | None, Field(
-        description="Replacement scratch.create ID; omit to reuse the previous reference.")] = None,
-    run_ref: Annotated[str | None, Field(
-        description="Execution ID from this conversation; omit for the last accepted command.")] = None,
-) -> dict:
-    """Re-execute a command from this conversation with its saved run settings.
-
-    Uses current environment overrides and creates fresh logs. The command survives
-    MCP reconnects and compaction, including failed or cancelled runs. Invalid requests
-    do not replace it. Concurrent runs are ordered by acceptance, not completion.
-    With no previous command, or a deleted scratch reference, fails without executing.
-    IDs recorded before per-execution settings were saved cannot be rerun by ID.
-    Call result() after transport failures before requesting a rerun.
+    Saved cmd and run settings survive server restart. Repeats side effects.
+    scratch_ref can replace deleted storage. Invalid requests do not replace history.
     """
     state = session_state(ctx)
-    if run_ref is None:
-        arguments = state.command()
-    else:
-        arguments = state.execution(run_ref).get('arguments')
-        if arguments is None:
-            raise ValueError('This execution has no saved run settings; cannot rerun by ID')
+    arguments = state.command() if run_ref is None else state.execution(run_ref).get('arguments')
+    if arguments is None:
+        raise ValueError('This execution has no saved run settings; cannot rerun by ID')
+    # Retained histories may predate the Bash-only API.
+    arguments = {key: value for key, value in arguments.items()
+                 if key not in ('shell', 'login')}
     if scratch_ref is not None:
         arguments['scratch_ref'] = scratch_ref
     return await run(ctx=ctx, **arguments)
 
 
+@mcp.tool(structured_output=False, annotations=ToolAnnotations(destructiveHint=True, openWorldHint=False))
+async def reset(
+    ctx: Context,
+    workdir: str | None = None,
+    login: bool | None = None,
+    memory_max_mib: Annotated[int | None, Field(ge=1, strict=True)] = None,
+) -> dict:
+    """Restart this conversation's Bash and stop its descendants; discard live state.
+
+    Omitted settings retain cwd, login choice and memory limit (initially true,
+    8192 MiB). workdir must be absolute. Rereads startup files and BASH_ENV.
+    Invalid settings leave the shell intact. Saved results/history remain.
+    """
+    state = session_state(ctx)
+    shell = sessions.setdefault(state.session, ShellSession(DEFAULT_WORKDIR))
+    async with shell.lock:
+        work = work_directory(workdir, DEFAULT_WORKDIR) if workdir is not None else shell.workdir
+        assert work is not None
+        if not work.is_dir():
+            raise ValueError('workdir must be an existing absolute directory')
+        previous, accounting_error = await snapshot(shell.env, shell.unit) if shell.unit else ({}, None)
+        error = None
+        with anyio.CancelScope(shield=True):
+            error = await shell.close()
+        if error:
+            shell.lost = 'reset cleanup failed'
+            raise RuntimeError(error)
+        shell.workdir = work
+        if login is not None:
+            shell.login = login
+        if memory_max_mib is not None:
+            shell.memory_max_mib = memory_max_mib
+        shell.lost = None
+        try:
+            await shell.start()
+        except BaseException:
+            with anyio.CancelScope(shield=True):
+                await shell.close()
+            raise
+        data = dict(workdir=str(shell.workdir), pid=shell.pid, unit=shell.unit,
+                    login=shell.login, memory_max_mib=shell.memory_max_mib)
+        if previous:
+            data['previous_io_read_bytes'] = counter(previous, 'IOReadBytes')
+            data['previous_io_write_bytes'] = counter(previous, 'IOWriteBytes')
+        if accounting_error:
+            data['accounting_error'] = accounting_error
+        return data
+
+
+async def serve():
+    task = asyncio.current_task()
+    assert task is not None
+
+    def terminate():
+        global terminating
+        terminating = True
+        task.cancel()
+
+    asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, terminate)
+    try:
+        await mcp.run_stdio_async()
+    except asyncio.CancelledError:
+        pass
+
+
 if __name__ == "__main__":
-    mcp.run()
+    os.chdir(DEFAULT_WORKDIR)
+    asyncio.run(serve())

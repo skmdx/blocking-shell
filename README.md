@@ -1,155 +1,109 @@
 # Blocking Shell
 
-長時間のビルド・テストを1回のMCP呼び出しで終了まで待つCodex Plugin。
-終了状態、ログ末尾、子孫プロセスを含むCPU・メモリ・IO統計を返す。
-PTY・対話入力・ポーリング用ハンドルは提供しない。
+会話ごとのBashを使い回し、各コマンドの完了まで1回のMCP呼び出しで待つCodex Plugin。
+変数・export・関数・alias・作業ディレクトリを保持するため、初期化コードの再送が不要になる。
 
 ## 導入
 
 Linux、systemd 254以上の稼働中user manager、Bash、uv、Python 3.11以上、
-pluginコマンドに対応したCodexが必要。呼び出し側からuser busへ接続できること。
-MCP SDK、tiktoken、構文解析用のtree-sitterはuvが導入し、初回起動時にtiktokenの辞書をダウンロードする。
-実行結果の保存にはScratchプラグインも必要。
+Plugin対応のCodexが必要。user busへ接続できること。
+MCP SDK、tiktoken、tree-sitterはuvが導入する。
 
 ```sh
 codex plugin marketplace add skmdx/blocking-shell
 codex plugin add blocking-shell@blocking-shell
 ```
 
-インストール後は新しいスレッドで利用し、`/hooks`でフックを確認・信頼する。
-ローカルのソースを試す場合は、marketplaceの追加先をcloneしたリポジトリの絶対パスにする。
+ローカル版はmarketplaceの追加先をclone先にする。更新後はMCPを再接続する。
+フックの登録は不要。ログの整理にはScratchのdeleteを使える。
 
-## 実行と結果の確認
+## 使い方
 
-1. Scratchの`create`で保存先を作成する。
-2. `run`に`cmd`、既存ディレクトリの`workdir`、作成した`scratch_ref`を渡し、直接呼び出す。
-3. `status`・`exit_code`とログ末尾を確認する。不足する場合だけ`log_path`の完全ログや`result_path`の詳細JSONを読む。
-4. 結果が不要になったらScratchの`delete`で保存先を削除する。実行中の保存先は削除されない。
+通常は`run(cmd=...)`だけでよい。
 
-`workdir`には絶対パスのほか、`$SCRATCH_DIR`とその配下を指定できる。
-コマンド内でも`"$SCRATCH_DIR"`で選択した保存先を参照できる。
+```text
+run(cmd="export MODE=debug; n=0; step(){ n=$((n+1)); echo \"$MODE:$n\"; }")
+run(cmd="step")    → debug:1
+run(cmd="step")    → debug:2
+```
 
-`rerun()`は同じ会話で直前に受け付けたコマンドを、現在の環境設定で再実行する。
-`rerun(run_ref="...")`なら指定した実行を選ぶ。ID指定は実行条件の保存に対応した
-更新後の記録で利用でき、更新前の記録ではエラーになる。
-実行条件は引き継ぎ、ログは新規作成する。保存先を変更する場合は
-`rerun(scratch_ref="...")`を使う。履歴はMCP再接続・圧縮後も維持される。
-通信失敗時は`result()`で最後に受け付けた実行を確認してから再実行を判断する。
-既知の実行には`run`・`rerun`が返した`run_ref`を渡せる。同時実行時の「最後」は受付順。
-`state=finished`なら通常実行と同じ要約を返す。それ以外は`running`・`finishing`・
-`unknown`（結果未確定）・`expired`（保存先削除済み）を区別し、成功を推測しない。
-この対応記録は更新後の実行から作成される。過去のログを自動探索・登録はしない。
+`source ./sdk-env.sh`や`cd`も一度実行すれば次の呼び出しへ引き継ぐ。
+`declare -p 名前`、`declare -f 関数名`、`compgen -v`などで状態を確認できる。
+aliasを使う場合は`shopt -s expand_aliases`を設定する。
+同じ会話の呼び出しは直列実行し、別の会話とは分離する。PTY・対話入力は提供しない。
 
-同じ会話・作業ディレクトリ・シェルで、類似する長いコマンドや共通手順が3回現れると、
-結果の`suggestion`でスクリプト化または既存ツールへの統合を短く推奨する。
-通常はこのフィールドを省略する。候補と通知済み状態は再接続後も維持し、
-会話ごとに最近の64候補を保持する。保持中の同じ候補には繰り返し通知しない。
-`result()`は保存された推奨も含めて元の結果を返す。
+| 操作 | 用途 |
+| --- | --- |
+| `run(cmd=...)` | 現在のBashで実行し、終了結果を返す |
+| `reset()` | 子孫プロセスを停止してBashを作り直す。履歴・ログは残る |
+| `result(run_ref=...)` | 保存結果を取得する。省略時は最後に受け付けた実行 |
+| `rerun(run_ref=...)` | 保存したコマンドと条件を現在のBash状態で再実行する |
 
-対象はBash・shで受け付けた400文字以上・UTF-8で32 KiB以下のコマンド。
-シェル本文・Python本文を解析し、全体と連続する共通部分を比較する。
-構文未対応や解析量の上限を超えるものは候補にしない。これは共通化候補の通知であり、
-意味の等価性や安全な書換えを保証せず、コマンドの書換え・自動実行は行わない。
+`run`の`workdir`は実行前の明示的なcd。`scratch_ref`はログ保存先の指定で、
+省略すると自動作成した保存先を再利用する。選択先は毎回`SCRATCH_DIR`としてexportする。
+`workdir="$SCRATCH_DIR"`とその配下も指定できる。結果の`scratch_ref`はScratchへ渡せる。
+保存先が不要になったら削除する。実行中はleaseにより削除を防ぐ。
 
 | 設定 | 既定値・動作 |
 | --- | --- |
-| `timeout_seconds` | 6時間。1〜86400秒で変更でき、期限超過時は子孫プロセスも停止する |
-| `memory_max_mib` | 子孫全体で8 GiB。swapはホスト側の設定に従い、メモリ枯渇時はcgroup全体を停止する |
-| `max_output_tokens` | ログ末尾1000トークン。結果メタデータは含まない |
-| `shell`・`login` | ユーザーの既定シェルで`-lc`。`login=false`なら`-c` |
+| 初期作業ディレクトリ | `CODEX_WORK`、未指定なら`~/codex-work` |
+| `timeout_seconds` | 呼び出しごとに6時間。1〜86400秒 |
+| `memory_max_mib` | Bashと子孫全体で初期8 GiB。変更後は保持。swapはホスト設定に従う |
+| `max_output_tokens` | ログ末尾1000トークン。メタデータは含まない |
+| `reset(login=false)` | login startupを省略。既定はtrue。BASH_ENVはいずれでも読む |
 
-統計はunit cgroupの回収前に取得し、取得不能は`null`で表す。
-`accounting_error`・`cleanup_error`がある場合は、計測や後片付けの失敗を確認する。
-ログのトークン数は`o200k_base`による計数で、利用モデルの課金トークン数ではない。
-サーバーの強制終了やホスト障害からのジョブ復元は行わない。
+## 状態と結果
 
-各ツールの操作契約と実行時の注意点は[スキル](plugins/blocking-shell/skills/blocking-shell/SKILL.md)を参照。
+通常の非ゼロ終了では状態を保持する。`exit`・`exec`・`set -e`によるシェル終了、
+タイムアウト、キャンセル、OOMでは`state_lost`を返し、再開には`reset`が必要。
+Bashの起動設定を変更する場合もresetを使う。省略したreset設定は現在のcwd・login・メモリ制限を保持する。
+MCPサーバーの再起動はBash状態を失う。会話の圧縮だけなら、サーバーが存続している限り保持する。
+削除済みのcwdからresetする場合は既存の`workdir`を指定する。
 
-## 環境設定
+`status`と`exit_code`を確認する。`state=finished`だけでは成功を意味しない。
+完全ログと詳細JSONは`log_path`・`result_path`に保存する。
+CPU・IOは実行区間のcgroupカウンタ差分で、並行するバックグラウンド処理も含む。
+`session_memory_peak_bytes`はBash起動からの累積ピーク。取得不能はnullであり、ゼロではない。
+`accounting_error`・`cleanup_error`があれば確認する。
+出力制限はo200k_baseによる計数で、課金トークン数ではない。
 
-設定を使う期間と、値だけかBash処理が必要かで選ぶ。
+バックグラウンドジョブは次の呼び出しへ残り、resetまたはサーバーの正常終了で停止する。
+完了を評価する作業はフォアグラウンドで実行する。
+タイムアウトには独立したsystemd timerも設定し、サーバーの強制終了後も停止期限を守る。
+強制終了時の結果確定やBash状態の復元は行わない。
 
-| 局面 | 選ぶ方法 | 例 |
-| --- | --- | --- |
-| 次の1回だけコンパイラや初期化を変える | `run`の`cmd`に書く | `CC=clang make`、`source ./sdk-env.sh && make` |
-| この会話でビルドとテストに同じ値を渡す | `set_env` | `set_env(values={"CC": "clang"})` |
-| この会話で関数・alias・SDK初期化を繰り返し使う | `set_bashrc` | `set_bashrc(script="source ./sdk-env.sh")` |
-| 別の会話やツールでも常に使う | 共通の`BASH_ENV`ファイル | 普段使う関数や環境変数 |
+通信失敗時は再実行する前にresultを使う。確定済みならrunと同じ要約を返す。
+未確定はrunning、所有者も結果も失われた場合はunknown、ログ削除済みはexpired。
+履歴はサーバー再起動後も残る。rerunは副作用を繰り返すため、通常のrunと同じ実行許可が必要。
 
-`set_bashrc`はBash本文を登録する。たとえば`source ./sdk-env.sh`は各コマンドの
-`workdir`を基準に、実行のたびに読み込まれる。作業ディレクトリを変える場合は、
-共通して参照できるパスを指定する。コンパイルなどの本処理は`cmd`に置く。
-値だけの設定は`set_env`で十分で、事前の設定が不要ならそのまま`run`を使う。
+共通の環境設定はCodexユーザー設定の`shell_environment_policy.set.BASH_ENV`を参照し、
+未指定時はサーバー起動時のBASH_ENVを継承する。Bashの起動時に一度だけ読む。
+従来のset_env・bashrc登録ツールと圧縮フックは削除した。export・unset・sourceを直接使う。
+旧登録内容は自動適用しない。履歴DBは従来と同じ
+`$XDG_STATE_HOME/blocking-shell`（既定`~/.local/state/blocking-shell`）に置き、
+`BLOCKING_SHELL_STATE_DIR`で変更できる。
 
-常設のalias・関数・環境変数は、Codexのユーザー設定
-`$CODEX_HOME/config.toml`（既定`~/.codex/config.toml`）の
-`[shell_environment_policy.set]`に指定した`BASH_ENV`のファイルへまとめる。
-`run`・`rerun`ごとにこの設定を読み、未指定なら起動元の`BASH_ENV`を継承する。
-プロジェクト設定・profile・CLIの上書きは参照しない。Bashは`login`の値によらずこのファイルを読む。
+内部通信にはFD 197・198と`__blocking_shell_`で始まる名前を予約する。
+これらを変更しない。コードはBashのトップレベルでsourceされ、関数やサブシェルでは包まない。
 
-環境変数は`list_env()`で確認し、`unset_env(names=["CC"])`で解除する。
-Bash本文は登録時に返る`ref`を使い、`set_bashrc(ref="...", script="...")`で置換、
-`delete_bashrc(ref="...")`で解除する。IDを忘れた場合は`list_bashrc()`、
-本文の確認には`get_bashrc(refs=[...])`を使う。会話内での用途が終わった設定は解除する。
-
-環境変数の更新応答は変更した名前を返し、全値は`list_env`で確認する。
-Bash本文は対象別に成功・失敗を返す。`next_cursor`があれば同じ`refs`で続きを取得する。
-途中で対象の本文が変わった場合は継続を拒否するため、先頭から読み直す。
-
-会話の設定はMCP再接続・圧縮後も維持され、以後の`run`・`rerun`へ適用する。
-他の会話・他のツール・実行中のコマンドには適用しない。
-`set_env`は継承環境とユーザー設定の`BASH_ENV`より優先するが、シェルの起動処理で変更される場合がある。
-登録したBash処理は通常の起動処理後、コマンド前に登録順で読み込む。
-非ゼロで終了した場合は後続の処理を停止する。登録中はBashを使い、対話待ちは入れない。
-
-状態の保存先は`$XDG_STATE_HOME/blocking-shell`（既定`~/.local/state/blocking-shell`）。
-ホスト環境の`BLOCKING_SHELL_STATE_DIR`で変更できる。
-自動圧縮後は`SessionStart`フックが環境変数の名前、Bash処理のIDをモデルへ伝える。
-保存された値は引き続きコマンドへ適用され、通常実行のために再取得する必要はない。
-Codex 0.162.0の手動圧縮APIではこのフックは発火しない。
+長い類似コマンドが同じ会話・cwdで繰り返される場合は、任意のsuggestionで共通化を提案する。
+400文字以上・32 KiB以下のBash/Python本文を対象に最近64候補を保持し、3回目に一度だけ通知する。
+コマンドの書換えや自動実行は行わない。
 
 ## 開発時の検証
 
-実MCP通信の試験は、一時保存先を指定して実行する。
+TMPDIRを既存の一時保存先に設定して実行する。実MCP通信とsystemdを使用する。
 
 ```sh
-uv run --script plugins/blocking-shell/tests/test_mcp.py /absolute/scratch
-TMPDIR=/absolute/scratch uv run --script plugins/blocking-shell/tests/test_environment.py
-TMPDIR=/absolute/scratch uv run --script plugins/blocking-shell/tests/test_rerun.py
-TMPDIR=/absolute/scratch uv run --script plugins/blocking-shell/tests/test_recovery.py
-TMPDIR=/absolute/scratch uv run --script plugins/blocking-shell/tests/test_patterns.py
-TMPDIR=/absolute/scratch uv run --script plugins/blocking-shell/tests/test_suggestions.py
+uv run --script plugins/blocking-shell/tests/test_repl.py
+uv run --script plugins/blocking-shell/tests/test_recovery.py
+uv run --script plugins/blocking-shell/tests/test_history.py
+uv run --script plugins/blocking-shell/tests/test_patterns.py
+uv run --script plugins/blocking-shell/tests/test_suggestions.py
 ```
 
-インストール済みPluginを実Codexで確認する試験は、Codex利用枠を使用する。
+`tests/smoke_codex.py`は明示的な実行時のみCodex利用枠を使い、実Codexでビルドと直接呼び出しを確認する。
+`experiments/template_similarity.py`は取得済みの履歴に対するオフライン分析であり、コマンドは実行しない。
 
-```sh
-python3 plugins/blocking-shell/tests/smoke_codex.py --codex /path/to/codex --out-dir /absolute/new-scratch
-```
-
-65秒待機を含むCプログラムのビルド・実行で、直接呼び出し1回、ポーリング0回、
-正常終了、実行結果、既定の6時間期限を確認する。試験結果は確認後に削除する。
-
-### テンプレート候補の実験
-
-[template_similarity.py](experiments/template_similarity.py)はsession-historyの取得JSONを使い、
-直近100回の`run`を最大50件前まで比較するオフラインPoC。
-履歴のコマンドは実行せず、サーバーやインストール済みPluginも変更しない。
-資源制限付きのblocking-shellから実行する。
-
-```sh
-uv run --script experiments/template_similarity.py history.json --out result.json
-```
-
-raw DEFLATEの対称化NCDとシェルトークン列のSequenceMatcherを比較し、前半で閾値を選び、後半で評価する。
-評価は「pytest呼び出しが出力先だけ異なり、実行条件も一致する」という限定した基準。
-完全一致は精度評価から除外し、長すぎる入力は除外数を返す。意味の類似性や別セッションへの汎化精度は測らない。
-
-候補が3件以上あり、異なる`--option=/path`を分離できる場合に、完全復元を確認したテンプレート案を生成する。
-レビュー用の案であり、安全なシェル生成・実行機能ではない。
-トークン比較は`o200k_base`・空白なしJSONで定義と説明を1回含めた回顧的試算。
-ツールスキーマ・応答・会話履歴の再入力を含まず、実現済みの節約量ではない。
-結果JSONにはコマンドと実行条件を含むため、公開前に内容を確認する。
-同じ選択上限で再入力すれば、全会話を保持せずに再評価できる。
-
-MIT License。詳細は[LICENSE](LICENSE)を参照。
+エージェント向けの手順は[スキル](plugins/blocking-shell/skills/blocking-shell/SKILL.md)、
+未解決の制約は[TODO](TODO.md)を参照。MIT License。

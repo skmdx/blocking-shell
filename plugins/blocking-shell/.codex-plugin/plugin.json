@@ -1,7 +1,7 @@
 {
   "name": "blocking-shell",
-  "version": "0.10.3+codex.20261105.1",
-  "description": "Run long shell commands through one blocking MCP call without polling.",
+  "version": "0.11.0",
+  "description": "Reuse Bash state and wait for commands through one blocking MCP call.",
   "author": {
     "name": "skmdx"
   },
@@ -9,12 +9,11 @@
   "interface": {
     "displayName": "Blocking Shell",
     "shortDescription": "Wait for builds and tests without polling",
-    "longDescription": "Run long shell commands through one blocking MCP call without polling.",
+    "longDescription": "Reuse Bash variables, functions and working directory across blocking calls.",
     "developerName": "skmdx",
     "category": "Productivity",
     "capabilities": [],
     "defaultPrompt": "Run the build and wait for completion with blocking-shell."
   },
-  "mcpServers": "./.mcp.json",
-  "hooks": "./hooks/hooks.json"
+  "mcpServers": "./.mcp.json"
 }

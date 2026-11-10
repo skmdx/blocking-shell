@@ -2,7 +2,7 @@
 # requires-python = ">=3.11"
 # dependencies = ["mcp>=1.12,<2", "tiktoken>=0.12,<1", "tree-sitter>=0.25,<0.26", "tree-sitter-bash>=0.25,<0.26"]
 # ///
-"""Recover real executions after response loss, server death, and concurrent runs."""
+"""Lost replies, SIGTERM cleanup and deadlines surviving a killed MCP server."""
 import asyncio
 from contextlib import asynccontextmanager
 import json
@@ -19,12 +19,10 @@ from mcp.client.stdio import stdio_client
 from mcp.shared.exceptions import McpError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from scratch_space import ScratchSpace
-from test_environment import call
+from test_repl import call
 
 
 def drop_response(server):
-    """Forward real MCP traffic except the completed run response."""
     with subprocess.Popen([sys.executable, server], stdin=sys.stdin, stdout=subprocess.PIPE) as child:
         try:
             assert child.stdout is not None
@@ -49,113 +47,66 @@ async def main():
     plugin = Path(__file__).resolve().parents[1]
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
-        space = ScratchSpace(root, 'one')
-        scratch = space.create()
-        env = dict(os.environ, SCRATCH_ROOT=directory, CODEX_THREAD_ID='one',
-                   BLOCKING_SHELL_STATE_DIR=str(root/'state'))
-        pidfile = root/'server.pid'
+        (root / 'tmp').mkdir()
+        (root / 'codex').mkdir()
+        env = dict(os.environ, CODEX_WORK=directory, SCRATCH_ROOT=str(root / 'tmp'),
+                   CODEX_HOME=str(root / 'codex'), BASH_ENV='', CODEX_THREAD_ID='one',
+                   BLOCKING_SHELL_STATE_DIR=str(root / 'state'))
+        pidfile = root / 'server.pid'
 
         @asynccontextmanager
         async def connect(drop=False):
             if drop:
-                command, args = sys.executable, [__file__, '--drop-response', str(plugin/'server.py')]
+                command, args = sys.executable, [__file__, '--drop-response', str(plugin / 'server.py')]
             else:
                 command = '/bin/bash'
                 args = ['-c', 'echo $$ > ' + shlex.quote(str(pidfile)) + '; exec ' +
-                        shlex.join([sys.executable, str(plugin/'server.py')])]
+                        shlex.join([sys.executable, str(plugin / 'server.py')])]
             async with stdio_client(StdioServerParameters(command=command, args=args, env=env)) as (r, w):
                 async with ClientSession(r, w) as session:
                     await session.initialize()
                     yield session
 
-        async def run(session, cmd):
-            return await call(session, 'run', dict(cmd=cmd, workdir=directory,
-                              scratch_ref=scratch['scratch_ref'], login=False,
-                              memory_max_mib=64, timeout_seconds=15))
-
-        async def ready(name):
-            async with asyncio.timeout(10):
-                while not (root/name).exists():
-                    await asyncio.sleep(0.02)
-
-        async with connect(drop=True) as session:
+        async with connect(drop=True) as s:
             try:
-                await run(session, 'echo once >> count; echo complete')
+                await call(s, 'run', dict(cmd='echo once >> count; echo complete'))
             except McpError:
                 pass
             else:
-                raise AssertionError('proxy failed to drop the response')
-        async with connect() as session:
-            recovered = await call(session, 'result')
+                raise AssertionError('proxy did not drop the response')
+        assert not list((root / 'tmp').glob('blocking-shell-*')), 'SIGTERM leaked runtime'
+        async with connect() as s:
+            recovered = await call(s, 'result')
             assert recovered['state'] == 'finished' and recovered['exit_code'] == 0, recovered
             assert recovered['output_tail'] == 'complete\n'
-            assert (root/'count').read_text() == 'once\n'
-            first = asyncio.create_task(run(session, 'echo $$ > first; echo active; while [ ! -f release ]; do sleep .05; done'))
-            await ready('first')
-            active = await call(session, 'result')
-            assert active['state'] == 'running', active
-            assert active['pid'] == int((root/'first').read_text()), active
-            assert active['unit'] == 'blocking-shell-' + active['run_ref'] + '.service'
-            assert active['output_tail'] == 'active\n' and not active['output_truncated'], active
-            assert active['elapsed_seconds'] >= 0 and active['cpu_seconds'] >= 0, active
-            assert {'memory_peak_bytes', 'io_read_bytes', 'io_write_bytes'} <= active.keys()
-            assert Path(active['log_path']).is_file() and not Path(active['result_path']).exists()
-            assert 'exit_code' not in active and 'status' not in active
-            assert space.delete()['skipped_active'] == [scratch['scratch_ref']]
-            second = await run(session, 'echo second')
-            assert await call(session, 'result') == second
-            (root/'release').touch()
-            ended = await first
-            assert ended['pid'] == active['pid'] and ended['unit'] == active['unit'], ended
-            assert active.keys() <= ended.keys(), ended
-            assert await call(session, 'result', {'run_ref': active['run_ref']}) == ended
-            assert await call(session, 'result') == second
-            await call(session, 'result', {'run_ref': active['run_ref']}, owner='two', error=True)
-
-        # Kill the MCP process while its independent systemd service is running.
-        unit = None
-        try:
-            async with connect() as session:
-                task = asyncio.create_task(run(session, 'touch crash; while [ ! -f crash-release ]; do sleep .05; done'))
-                await ready('crash')
-                crashed = await call(session, 'result')
-                unit = 'blocking-shell-' + crashed['run_ref'] + '.service'
-                os.kill(int(pidfile.read_text()), signal.SIGKILL)
-                try:
-                    await task
-                except McpError:
-                    pass
-                else:
-                    raise AssertionError('server death unexpectedly returned a result')
-            async with connect() as session:
-                active = await call(session, 'result')
-                assert active['state'] == 'running', active
-                assert all(active[key] == crashed[key] for key in ('run_ref', 'unit', 'pid')), active
-                # The job finishes, but the dead server cannot save its result.
-                (root/'crash-release').touch()
-                async with asyncio.timeout(10):
-                    while True:
-                        check = await asyncio.create_subprocess_exec(
-                            'systemctl', '--user', 'show', unit, '--property=SubState', '--value',
-                            stdout=asyncio.subprocess.PIPE)
-                        output, _ = await check.communicate()
-                        if output.strip() == b'exited':
-                            break
-                        await asyncio.sleep(.02)
-                unknown = await call(session, 'result')
-                assert unknown['state'] == 'unknown' and 'exit_code' not in unknown, unknown
-                proc = await asyncio.create_subprocess_exec('systemctl', '--user', 'stop', unit)
-                assert await proc.wait() == 0
-                unknown = await call(session, 'result')
-                assert unknown['state'] == 'unknown' and 'exit_code' not in unknown, unknown
-        finally:
-            if unit:
-                subprocess.run(['systemctl', '--user', 'stop', unit], check=False, capture_output=True)
-                subprocess.run(['systemctl', '--user', 'reset-failed', unit], check=False, capture_output=True)
-        assert space.delete()['deleted'] == [scratch['scratch_ref']]
-        async with connect() as session:
-            assert await call(session, 'result') == dict(run_ref=crashed['run_ref'], state='expired')
-    print('PASS: lost response, restart, concurrent acceptance order, running, server death, unknown, expired')
+            assert (root / 'count').read_text() == 'once\n'
+            task = asyncio.create_task(call(s, 'run', dict(
+                cmd='echo $$ > ready; sleep 60 & echo "$!" > child; wait', timeout_seconds=2)))
+            async with asyncio.timeout(5):
+                while not (root / 'child').exists():
+                    await asyncio.sleep(.01)
+            active = await call(s, 'result')
+            child = int((root / 'child').read_text())
+            os.kill(int(pidfile.read_text()), signal.SIGKILL)
+            try:
+                await task
+            except McpError:
+                pass
+            else:
+                raise AssertionError('killed server returned a result')
+        # The timer, not the dead Python process, must stop Bash and its child.
+        await asyncio.sleep(4)
+        assert not Path(f'/proc/{active["pid"]}').exists(), active
+        assert not Path(f'/proc/{child}').exists(), child
+        async with connect() as s:
+            unknown = await call(s, 'result')
+            assert unknown['state'] == 'unknown' and 'exit_code' not in unknown, unknown
+            task = asyncio.create_task(call(s, 'run', dict(cmd='sleep 1; echo new-shell')))
+            await asyncio.sleep(.1)
+            unknown = await call(s, 'result', dict(run_ref=active['run_ref']))
+            assert unknown['state'] == 'unknown', unknown
+            await task
+        print('lost response, SIGTERM cleanup, crash deadline and unknown recovery: passed')
 
 
 if __name__ == '__main__':
