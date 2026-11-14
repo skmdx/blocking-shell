@@ -36,7 +36,7 @@ before relying on measurements or cleanup.
 
 Normally retain the timeout and memory settings. Default timeout is six hours
 per call; initial memory limit is 8 GiB for Bash and descendants. A changed memory
-limit persists. Do not automatically retry or raise limits after exhaustion.
+limit persists.
 
 Ordinary nonzero exit status retains state. Shell exit (including exec or errexit),
 timeout, cancellation and OOM lose it. After state_lost, call reset and restore

@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import shutil
 import stat
+import subprocess
 import time
 import uuid
 from word_ids import WORDS, new_id
@@ -43,24 +44,43 @@ class ScratchSpace:
             json.dump(records, stream)
         pending.replace(self.state / 'registry.json')
 
-    def _path(self, record: dict) -> Path:
+    def _directory(self, record: dict) -> Path:
         name = record['name']
         if not isinstance(name, str) or Path(name).name != name or name in ('.', '..'):
             raise ValueError('invalid scratch directory record')
-        path = self.root / name
+        root = self.state / 'tmpfs' if 'tmpfs_boot_id' in record else self.root
+        return root / name
+
+    def _path(self, record: dict) -> Path:
+        path = self._directory(record)
+        if 'tmpfs_boot_id' in record:
+            # tmpfs inodes can be reused after reboot; the registry is durable.
+            if record['tmpfs_boot_id'] != Path('/proc/sys/kernel/random/boot_id').read_text().strip():
+                raise FileNotFoundError('scratch tmpfs contents expired after reboot')
+            device = record['identity'][0]
+            if path.parent.is_symlink():
+                raise ValueError('scratch tmpfs root must not be a symlink')
+        else:
+            # Existing disk-backed references survive device renumbering.
+            device = self.root.stat().st_dev
         info = path.lstat()
-        # Device numbers can change across boots (including Btrfs subvolumes).
-        # The inode belongs to the configured root's filesystem, whose current
-        # device number also excludes mounts replacing a managed directory.
         if not stat.S_ISDIR(info.st_mode) or (info.st_dev, info.st_ino) != (
-                self.root.stat().st_dev, record['identity'][1]):
+                device, record['identity'][1]):
             raise ValueError('scratch directory was replaced; refusing access')
         return path
 
     def create(self) -> dict:
         with self._registry() as records:
+            root = self.state / 'tmpfs'
+            root.mkdir(mode=0o700, exist_ok=True)
+            if root.is_symlink():
+                raise ValueError('scratch tmpfs root must not be a symlink')
+            filesystem = subprocess.check_output(['stat', '-f', '-c', '%T', '--', str(root)], text=True).strip()
+            if filesystem != 'tmpfs':
+                raise ValueError('scratch storage must be tmpfs; run tools/scratch/setup-tmpfs.sh')
+            boot_id = Path('/proc/sys/kernel/random/boot_id').read_text().strip()
             for _ in range(100):
-                path = self.root / new_id(records.__contains__)
+                path = root / new_id(records.__contains__)
                 try:
                     created_at_ms = time.time_ns() // 1_000_000
                     path.mkdir(mode=0o700)
@@ -75,6 +95,7 @@ class ScratchSpace:
                 info = path.stat()
                 records[ref] = dict(name=path.name, session=self.session,
                                     created_at_ms=created_at_ms,
+                                    tmpfs_boot_id=boot_id,
                                     identity=[info.st_dev, info.st_ino])
                 self._save(records)
             except BaseException:
@@ -111,7 +132,7 @@ class ScratchSpace:
         resolved = Path(path).resolve(strict=True)
         with self._registry() as records:
             refs = [ref for ref, record in records.items()
-                    if not record.get('deleted') and self.root / record['name'] in (resolved, *resolved.parents)]
+                    if not record.get('deleted') and self._directory(record) in (resolved, *resolved.parents)]
         if len(refs) != 1:
             raise ValueError('path must be inside a directory created by scratch.create')
         with self.lease(refs[0]) as directory:
@@ -178,7 +199,8 @@ class ScratchSpace:
                     continue
                 except FileNotFoundError:
                     # Missing lock files do not authorize deleting an unprotected directory.
-                    if (self.root / record['name']).exists():
+                    if ('tmpfs_boot_id' not in record or record['tmpfs_boot_id'] ==
+                            Path('/proc/sys/kernel/random/boot_id').read_text().strip()) and self._directory(record).exists():
                         result['errors'][ref] = 'scratch lease file is missing'
                         continue
                     result['missing'].append(ref)
